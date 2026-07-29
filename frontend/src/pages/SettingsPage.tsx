@@ -77,7 +77,7 @@ registerSettingsSearch({ labelKey: 'settings.concurrentUploadsTitle', labelFallb
 registerSettingsSearch({ labelKey: 'settings.gcodeInjection', labelFallback: 'G-code Injection', tab: 'queue', keywords: 'gcode injection start end autoprint farmloop swapmod autoclear printflow', anchor: 'card-gcode' });
 registerSettingsSearch({ labelKey: 'settings.slicerCard', labelFallback: 'Slicer', tab: 'queue', keywords: 'slicer orcaslicer bambustudio orca bambu api sidecar url docker preferred', anchor: 'card-slicer' });
 registerSettingsSearch({ labelKey: 'settings.queueDrying', tab: 'queue', keywords: 'drying presets temperature time humidity ams', anchor: 'card-drying' });
-registerSettingsSearch({ labelKey: 'settings.filamentChecks', tab: 'filament', keywords: 'filament check warning runout remaining', anchor: 'card-filamentchecks' });
+registerSettingsSearch({ labelKey: 'settings.filamentChecks', tab: 'filament', keywords: 'filament check warning runout remaining pause unassigned spool', anchor: 'card-filamentchecks' });
 registerSettingsSearch({ labelKey: 'settings.printModal', tab: 'filament', keywords: 'print modal custom mapping', anchor: 'card-printmodal' });
 registerSettingsSearch({ labelKey: 'settings.amsDisplayThresholds', tab: 'filament', keywords: 'ams humidity temperature threshold history retention', anchor: 'card-amsthresholds' });
 registerSettingsSearch({ labelKey: 'settings.externalUrl', tab: 'network', keywords: 'external url reverse proxy public notification link', anchor: 'card-externalurl' });
@@ -975,6 +975,7 @@ export function SettingsPage() {
       settings.ams_history_retention_days !== localSettings.ams_history_retention_days ||
       settings.disable_filament_warnings !== localSettings.disable_filament_warnings ||
       settings.prefer_lowest_filament !== localSettings.prefer_lowest_filament ||
+      (settings.pause_print_on_unassigned_spool ?? false) !== (localSettings.pause_print_on_unassigned_spool ?? false) ||
       (settings.queue_drying_enabled ?? false) !== (localSettings.queue_drying_enabled ?? false) ||
       (settings.queue_drying_block ?? false) !== (localSettings.queue_drying_block ?? false) ||
       (settings.ambient_drying_enabled ?? false) !== (localSettings.ambient_drying_enabled ?? false) ||
@@ -1074,6 +1075,7 @@ export function SettingsPage() {
         ams_history_retention_days: localSettings.ams_history_retention_days,
         disable_filament_warnings: localSettings.disable_filament_warnings,
         prefer_lowest_filament: localSettings.prefer_lowest_filament,
+        pause_print_on_unassigned_spool: localSettings.pause_print_on_unassigned_spool,
         queue_drying_enabled: localSettings.queue_drying_enabled,
         queue_drying_block: localSettings.queue_drying_block,
         ambient_drying_enabled: localSettings.ambient_drying_enabled,
@@ -5174,6 +5176,26 @@ export function SettingsPage() {
                       type="checkbox"
                       checked={localSettings.prefer_lowest_filament}
                       onChange={(e) => updateSetting('prefer_lowest_filament', e.target.checked)}
+                      className="sr-only peer"
+                    />
+                    <div className="w-11 h-6 bg-bambu-dark-tertiary peer-focus:outline-none rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:rounded-full after:h-5 after:w-5 after:transition-all peer-checked:bg-bambu-green"></div>
+                  </label>
+                </div>
+                <div className="flex items-center justify-between">
+                  <div>
+                    <p className="text-white">{t('settings.pausePrintOnUnassignedSpool')}</p>
+                    <p className="text-sm text-bambu-gray">
+                      {t('settings.pausePrintOnUnassignedSpoolDesc')}
+                    </p>
+                    <p className="text-xs text-bambu-gray/70 mt-1">
+                      {t('settings.pausePrintOnUnassignedSpoolNote')}
+                    </p>
+                  </div>
+                  <label className="relative inline-flex items-center cursor-pointer">
+                    <input
+                      type="checkbox"
+                      checked={localSettings.pause_print_on_unassigned_spool ?? false}
+                      onChange={(e) => updateSetting('pause_print_on_unassigned_spool', e.target.checked)}
                       className="sr-only peer"
                     />
                     <div className="w-11 h-6 bg-bambu-dark-tertiary peer-focus:outline-none rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:rounded-full after:h-5 after:w-5 after:transition-all peer-checked:bg-bambu-green"></div>

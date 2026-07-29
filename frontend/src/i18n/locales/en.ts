@@ -358,6 +358,7 @@ export default {
     toast: {
       printerDeleted: 'Printer deleted',
       missingSpoolAssignment: 'Print started on {{printer}}. Missing spool assignment for: {{slots}}',
+      missingSpoolAssignmentPaused: 'Print paused on {{printer}}. No spool assigned for: {{slots}}. Assign a spool, then resume.',
       assignmentVerified: 'Filament loaded on slot {{slot}} ({{printer}})',
       assignmentVerifiedNoKprofile: 'Slot {{slot}} on {{printer}} loaded, but the flow calibration (K-profile) was not applied',
       assignmentNotConfirmed: 'Could not confirm the assignment for slot {{slot}} on {{printer}} — check the AMS slot',
@@ -1885,6 +1886,9 @@ export default {
     preferLowestFilament: 'Prefer lowest remaining filament',
     preferLowestFilamentDesc: 'When multiple spools match, use the one with the least filament remaining',
     preferLowestFilamentBackupNote: 'Only takes effect when AMS Filament Backup is enabled on the printer — otherwise the printer cannot switch to a second spool when the picked one runs out.',
+    pausePrintOnUnassignedSpool: 'Pause print on unassigned spool',
+    pausePrintOnUnassignedSpoolDesc: 'Pause the print when it starts if a tray it uses has no assigned spool',
+    pausePrintOnUnassignedSpoolNote: 'Assign the spool and resume — the full filament usage is still tracked.',
     trackingModeBuiltIn: 'Built-in Inventory',
     trackingModeBuiltInDesc: 'RFID auto-matching and usage tracking included',
     trackingModeSpoolmanDesc: 'External filament management server',

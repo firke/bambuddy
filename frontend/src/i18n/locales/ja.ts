@@ -354,6 +354,7 @@ export default {
     toast: {
       printerDeleted: 'プリンターを削除しました',
       missingSpoolAssignment: '{{printer}}で印刷を開始しました。以下のスプール割り当てがありません: {{slots}}',
+      missingSpoolAssignmentPaused: '{{printer}}の印刷を一時停止しました。次のスロットにスプールが割り当てられていません: {{slots}}。スプールを割り当ててから再開してください。',
       assignmentVerified: 'スロット{{slot}}にフィラメントを読み込みました（{{printer}}）',
       assignmentVerifiedNoKprofile: '{{printer}}のスロット{{slot}}を読み込みましたが、フロー校正プロファイル（Kプロファイル）は適用されませんでした',
       assignmentNotConfirmed: '{{printer}}のスロット{{slot}}の割り当てを確認できませんでした。AMSスロットを確認してください',
@@ -1865,6 +1866,9 @@ export default {
     preferLowestFilament: '残量が少ないフィラメントを優先',
     preferLowestFilamentDesc: '複数のスプールが一致する場合、残量が最も少ないものを使用します',
     preferLowestFilamentBackupNote: 'プリンタ側でAMSフィラメントバックアップが有効な場合のみ動作します。無効の場合、選択したスプールが切れても予備スプールに切り替えできません。',
+    pausePrintOnUnassignedSpool: 'スプール未割り当て時に印刷を一時停止',
+    pausePrintOnUnassignedSpoolDesc: '使用するトレイにスプールが割り当てられていない場合、印刷開始時に一時停止します',
+    pausePrintOnUnassignedSpoolNote: 'スプールを割り当てて再開してください。フィラメント使用量は全量が記録されます。',
     trackingModeBuiltIn: '内蔵インベントリ',
     trackingModeBuiltInDesc: 'RFID自動検出と使用量追跡を含む',
     trackingModeSpoolmanDesc: '外部フィラメント管理サーバー',

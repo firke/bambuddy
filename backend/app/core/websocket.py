@@ -208,14 +208,20 @@ class ConnectionManager:
         printer_id: int,
         printer_name: str,
         missing_slots: list[dict[str, str]],
+        paused: bool = False,
     ):
-        """Notify clients that a print started with missing spool assignments."""
+        """Notify clients that a print started with missing spool assignments.
+
+        `paused` is True when pause_print_on_unassigned_spool was on and the
+        pause command was actually sent, so the UI can say so.
+        """
         await self.broadcast(
             {
                 "type": "missing_spool_assignment",
                 "printer_id": printer_id,
                 "printer_name": printer_name,
                 "missing_slots": missing_slots,
+                "paused": paused,
             }
         )
 

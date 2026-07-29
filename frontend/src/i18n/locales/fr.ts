@@ -355,6 +355,7 @@ export default {
     toast: {
       printerDeleted: 'Imprimante supprimée',
       missingSpoolAssignment: 'Impression démarrée sur {{printer}}. Attribution de bobine manquante pour : {{slots}}',
+      missingSpoolAssignmentPaused: 'Impression mise en pause sur {{printer}}. Aucune bobine attribuée pour : {{slots}}. Attribuez une bobine, puis reprenez.',
       assignmentVerified: 'Filament chargé dans l\'emplacement {{slot}} ({{printer}})',
       assignmentVerifiedNoKprofile: 'Emplacement {{slot}} sur {{printer}} chargé, mais le profil de calibration de débit (profil K) n\'a pas été appliqué',
       assignmentNotConfirmed: 'Impossible de confirmer l\'attribution de l\'emplacement {{slot}} sur {{printer}} — vérifiez l\'emplacement AMS',
@@ -1822,6 +1823,9 @@ export default {
     preferLowestFilament: 'Préférer le filament le plus bas',
     preferLowestFilamentDesc: 'Lorsque plusieurs bobines correspondent, utiliser celle avec le moins de filament restant',
     preferLowestFilamentBackupNote: "Ne prend effet que si AMS Filament Backup est activé sur l'imprimante — sinon, l'imprimante ne peut pas basculer vers une seconde bobine quand celle choisie est vide.",
+    pausePrintOnUnassignedSpool: "Mettre en pause si la bobine n'est pas attribuée",
+    pausePrintOnUnassignedSpoolDesc: "Mettre l'impression en pause au démarrage si un bac utilisé n'a pas de bobine attribuée",
+    pausePrintOnUnassignedSpoolNote: 'Attribuez la bobine et reprenez — la consommation totale de filament reste comptabilisée.',
     trackingModeBuiltIn: 'Inventaire Intégré',
     trackingModeBuiltInDesc: 'Correspondance RFID et suivi de consommation inclus',
     trackingModeSpoolmanDesc: 'Serveur de gestion externe',

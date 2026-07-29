@@ -335,6 +335,7 @@ export default {
     toast: {
       printerDeleted: "Принтер удалён",
       missingSpoolAssignment: "На принтере {{printer}} началась печать. Не назначены катушки для слотов: {{slots}}",
+      missingSpoolAssignmentPaused: 'Печать на {{printer}} приостановлена. Не назначены катушки для слотов: {{slots}}. Назначьте катушку и возобновите печать.',
       assignmentVerified: "Филамент загружен в слот {{slot}} ({{printer}})",
       assignmentVerifiedNoKprofile: "Слот {{slot}} на {{printer}} загружен, но профиль калибровки потока (K-профиль) не применён",
       assignmentNotConfirmed: "Не удалось подтвердить назначение слота {{slot}} на {{printer}} — проверьте слот AMS",
@@ -1769,6 +1770,9 @@ export default {
     preferLowestFilament: "Предпочитать катушку с наименьшим остатком",
     preferLowestFilamentDesc: "Если подходят несколько катушек, использовать катушку с наименьшим остатком филамента",
     preferLowestFilamentBackupNote: "Работает только при включённом AMS Filament Backup: иначе принтер не сможет переключиться на вторую катушку после окончания выбранной.",
+    pausePrintOnUnassignedSpool: 'Приостанавливать печать без назначенной катушки',
+    pausePrintOnUnassignedSpoolDesc: 'Приостанавливать печать при запуске, если у используемого слота нет назначенной катушки',
+    pausePrintOnUnassignedSpoolNote: 'Назначьте катушку и возобновите печать — весь расход филамента всё равно будет учтён.',
     trackingModeBuiltIn: "Встроенный инвентарь",
     trackingModeBuiltInDesc: "Автоматическое сопоставление RFID и учёт расхода",
     trackingModeSpoolmanDesc: "Внешний сервер управления филаментом",

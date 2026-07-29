@@ -355,6 +355,7 @@ export default {
     toast: {
       printerDeleted: 'Impresora eliminada',
       missingSpoolAssignment: 'Impresión iniciada en {{printer}}. Falta la asignación de bobina para: {{slots}}',
+      missingSpoolAssignmentPaused: 'Impresión pausada en {{printer}}. Ninguna bobina asignada para: {{slots}}. Asigna una bobina y reanuda.',
       assignmentVerified: 'Filamento cargado en la ranura {{slot}} ({{printer}})',
       assignmentVerifiedNoKprofile: 'Ranura {{slot}} en {{printer}} cargada, pero no se aplicó el perfil de calibración de flujo (perfil K)',
       assignmentNotConfirmed: 'No se pudo confirmar la asignación de la ranura {{slot}} en {{printer}}: revisa la ranura AMS',
@@ -1869,6 +1870,9 @@ export default {
     preferLowestFilament: 'Preferir el filamento con menos restante',
     preferLowestFilamentDesc: 'Cuando varias bobinas coincidan, usar la que tenga menos filamento restante',
     preferLowestFilamentBackupNote: 'Solo surte efecto cuando AMS Filament Backup está activado en la impresora — de lo contrario, la impresora no puede cambiar a una segunda bobina cuando la elegida se acabe.',
+    pausePrintOnUnassignedSpool: 'Pausar impresión si la bobina no está asignada',
+    pausePrintOnUnassignedSpoolDesc: 'Pausar la impresión al iniciarse si una bandeja que usa no tiene bobina asignada',
+    pausePrintOnUnassignedSpoolNote: 'Asigna la bobina y reanuda: el consumo completo de filamento se sigue registrando.',
     trackingModeBuiltIn: 'Inventario integrado',
     trackingModeBuiltInDesc: 'Incluye coincidencia automática por RFID y seguimiento del uso',
     trackingModeSpoolmanDesc: 'Servidor externo de gestión de filamento',

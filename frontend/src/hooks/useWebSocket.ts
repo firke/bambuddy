@@ -18,6 +18,8 @@ interface WebSocketMessage {
   data?: Record<string, unknown>;
   printer_name?: string;
   missing_slots?: Array<{ slot?: string }>;
+  // True when pause_print_on_unassigned_spool was on and the print was paused.
+  paused?: boolean;
   // Spool-assignment read-back verification (#2582).
   slot?: string;
   verified?: boolean;
@@ -283,18 +285,24 @@ export function useWebSocket() {
           break;
         }
 
-        const signature = missingSlotLabels.join('|');
+        const paused = message.paused === true;
+        // Fold `paused` into the dedup signature so a pause event isn't swallowed
+        // by an earlier plain warning for the same slots.
+        const signature = `${paused ? 'paused' : 'warn'}:${missingSlotLabels.join('|')}`;
         if (lastMissingSpoolWarningRef.current.get(message.printer_id) === signature) {
           break;
         }
         lastMissingSpoolWarningRef.current.set(message.printer_id, signature);
 
         const printerName = message.printer_name || `Printer ${message.printer_id}`;
-        const toastMsg = t('printers.toast.missingSpoolAssignment', {
-          printer: printerName,
-          slots: missingSlotLabels.join(', '),
-        });
-        showToast(toastMsg, 'warning');
+        const toastMsg = t(
+          paused ? 'printers.toast.missingSpoolAssignmentPaused' : 'printers.toast.missingSpoolAssignment',
+          {
+            printer: printerName,
+            slots: missingSlotLabels.join(', '),
+          }
+        );
+        showToast(toastMsg, paused ? 'error' : 'warning');
         break;
       }
 

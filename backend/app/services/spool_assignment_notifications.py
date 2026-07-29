@@ -1,5 +1,7 @@
 import logging
 
+from sqlalchemy.ext.asyncio import AsyncSession
+
 from backend.app.core.database import async_session
 from backend.app.core.websocket import ws_manager
 from backend.app.models.printer import Printer
@@ -108,12 +110,28 @@ def _decode_mqtt_mapping_to_global_trays(mapping_raw: object) -> list[int]:
     return decoded
 
 
-async def notify_missing_spool_assignments_on_print_start(
+async def check_spool_assignments_on_print_start(
     printer_id: int,
     data: dict,
     logger: logging.Logger,
 ) -> None:
-    """Send notification when print-start mapping references unassigned trays."""
+    """Notify — and optionally pause the print — when print-start mapping references unassigned trays.
+
+    An unassigned tray means the print's filament use is never debited from any
+    spool: every deduction site in usage_tracker skips trays with no assignment,
+    so inventory silently drifts. When pause_print_on_unassigned_spool is on we
+    pause instead, giving the user a chance to assign a spool and resume.
+
+    Pausing is safe for usage tracking: deduction happens only at print
+    completion (from the 3MF slicer estimate, not incrementally), and
+    _resolve_spool_id_for_tray falls back to the live SpoolAssignment row when
+    the print-start snapshot has no entry for a tray. A spool assigned during
+    the pause is therefore charged in full.
+
+    This fires at most once per print: on_print_start is suppressed on
+    PAUSE->RUNNING by the _was_running guard in bambu_mqtt, so resuming without
+    assigning a spool is treated as a deliberate override and is not re-paused.
+    """
     explicit_mapping = data.get("ams_mapping")
     explicit_values = (
         [value for value in explicit_mapping if isinstance(value, int)] if isinstance(explicit_mapping, list) else []
@@ -166,10 +184,13 @@ async def notify_missing_spool_assignments_on_print_start(
                     }
                 )
 
+            paused = await _pause_for_missing_assignments(printer_id, missing_global, db, logger)
+
             await ws_manager.send_missing_spool_assignment(
                 printer_id=printer_id,
                 printer_name=printer_name,
                 missing_slots=missing_slots,
+                paused=paused,
             )
 
             await notification_service.on_print_missing_spool_assignment(
@@ -180,3 +201,41 @@ async def notify_missing_spool_assignments_on_print_start(
             )
     except Exception as e:
         logger.warning("Missing spool-assignment notification failed: %s", e)
+
+
+async def _pause_for_missing_assignments(
+    printer_id: int,
+    missing_global: list[int],
+    db: AsyncSession,
+    logger: logging.Logger,
+) -> bool:
+    """Pause the print if the user opted in. Returns True only if the pause was sent.
+
+    Swallows its own errors so a failure here can never suppress the warning
+    notification the caller sends next — the user must still be told.
+    """
+    from backend.app.api.routes.settings import get_setting
+
+    try:
+        pause_enabled = await get_setting(db, "pause_print_on_unassigned_spool")
+        if not pause_enabled or pause_enabled.lower() != "true":
+            return False
+
+        client = printer_manager.get_client(printer_id)
+        if not client:
+            logger.warning(
+                "Cannot pause printer %d for unassigned spools %s: no MQTT client",
+                printer_id,
+                missing_global,
+            )
+            return False
+
+        if not client.pause_print():
+            logger.warning("Pause command rejected for printer %d (unassigned spools %s)", printer_id, missing_global)
+            return False
+
+        logger.info("Paused printer %d: trays %s have no assigned spool", printer_id, missing_global)
+        return True
+    except Exception as e:
+        logger.warning("Pause-on-unassigned-spool check failed for printer %d: %s", printer_id, e)
+        return False

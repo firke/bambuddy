@@ -355,6 +355,7 @@ export default {
     toast: {
       printerDeleted: 'Impressora excluída',
       missingSpoolAssignment: 'Impressão iniciada em {{printer}}. Atribuição de bobina ausente para: {{slots}}',
+      missingSpoolAssignmentPaused: 'Impressão pausada em {{printer}}. Nenhuma bobina atribuída para: {{slots}}. Atribua uma bobina e retome.',
       assignmentVerified: 'Filamento carregado no compartimento {{slot}} ({{printer}})',
       assignmentVerifiedNoKprofile: 'Compartimento {{slot}} em {{printer}} carregado, mas o perfil de calibração de fluxo (perfil K) não foi aplicado',
       assignmentNotConfirmed: 'Não foi possível confirmar a atribuição do compartimento {{slot}} em {{printer}} — verifique o compartimento AMS',
@@ -1822,6 +1823,9 @@ export default {
     preferLowestFilament: 'Preferir filamento com menor resto',
     preferLowestFilamentDesc: 'Quando vários carretéis correspondem, usar o com menos filamento restante',
     preferLowestFilamentBackupNote: 'Só tem efeito quando o AMS Filament Backup está habilitado na impressora — caso contrário, a impressora não pode trocar para um segundo carretel quando o escolhido acabar.',
+    pausePrintOnUnassignedSpool: 'Pausar impressão com bobina não atribuída',
+    pausePrintOnUnassignedSpoolDesc: 'Pausar a impressão ao iniciar se uma bandeja usada não tiver bobina atribuída',
+    pausePrintOnUnassignedSpoolNote: 'Atribua a bobina e retome: o consumo total de filamento continua sendo registrado.',
     trackingModeBuiltIn: 'Inventário Interno',
     trackingModeBuiltInDesc: 'Correspondência automática de RFID e rastreamento de uso incluídos',
     trackingModeSpoolmanDesc: 'Servidor de gerenciamento de filamento externo',

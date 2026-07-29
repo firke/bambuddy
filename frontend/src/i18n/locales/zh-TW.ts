@@ -355,6 +355,7 @@ export default {
     toast: {
       printerDeleted: '印表機已刪除',
       missingSpoolAssignment: '已在{{printer}}上開始列印。以下料槽未分配耗材: {{slots}}',
+      missingSpoolAssignmentPaused: '{{printer}}上的列印已暫停。以下料槽未分配料卷: {{slots}}。請分配料卷後繼續。',
       assignmentVerified: '耗材已載入料槽{{slot}}（{{printer}}）',
       assignmentVerifiedNoKprofile: '{{printer}}的料槽{{slot}}已載入，但流量校準設定檔（K設定檔）未套用',
       assignmentNotConfirmed: '無法確認{{printer}}上料槽{{slot}}的分配，請檢查AMS料槽',
@@ -1867,6 +1868,9 @@ export default {
     preferLowestFilament: '優先使用剩餘最少的耗材',
     preferLowestFilamentDesc: '當多個料盤匹配時，使用剩餘耗材最少的那個',
     preferLowestFilamentBackupNote: '僅當印表機端啟用了 AMS 備用料盤時才生效——否則當選中的料盤耗盡時，印表機無法切換到備用料盤。',
+    pausePrintOnUnassignedSpool: '未分配料卷時暫停列印',
+    pausePrintOnUnassignedSpoolDesc: '列印開始時，如果所用料盤沒有分配料卷則暫停列印',
+    pausePrintOnUnassignedSpoolNote: '分配料卷後繼續列印——耗材用量仍會完整記錄。',
     trackingModeBuiltIn: '內建庫存',
     trackingModeBuiltInDesc: '包含 RFID 自動匹配和用量追蹤',
     trackingModeSpoolmanDesc: '外部耗材管理伺服器',

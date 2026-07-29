@@ -330,6 +330,7 @@ export default {
     toast: {
       printerDeleted: '프린터가 삭제되었습니다',
       missingSpoolAssignment: '{{printer}}에서 인쇄가 시작되었습니다. 슬롯 할당 누락: {{slots}}',
+      missingSpoolAssignmentPaused: '{{printer}}의 인쇄를 일시정지했습니다. 스풀이 할당되지 않은 슬롯: {{slots}}. 스풀을 할당한 후 재개하세요.',
       assignmentVerified: '슬롯 {{slot}}에 필라멘트가 로드되었습니다 ({{printer}})',
       assignmentVerifiedNoKprofile: '{{printer}}의 슬롯 {{slot}}이(가) 로드되었지만 유량 보정 프로파일(K 프로파일)이 적용되지 않았습니다',
       assignmentNotConfirmed: '{{printer}}의 슬롯 {{slot}} 할당을 확인할 수 없습니다. AMS 슬롯을 확인하세요',
@@ -1772,6 +1773,9 @@ export default {
     preferLowestFilament: '남은 필라멘트가 가장 적은 것 우선',
     preferLowestFilamentDesc: '여러 스풀이 일치할 때 남은 필라멘트가 가장 적은 것 사용',
     preferLowestFilamentBackupNote: '프린터에서 AMS 필라멘트 백업이 활성화된 경우에만 적용됩니다. 그렇지 않으면 선택한 스풀이 다 떨어졌을 때 두 번째 스풀로 전환할 수 없습니다.',
+    pausePrintOnUnassignedSpool: '스풀 미할당 시 인쇄 일시정지',
+    pausePrintOnUnassignedSpoolDesc: '사용하는 트레이에 할당된 스풀이 없으면 인쇄 시작 시 일시정지합니다',
+    pausePrintOnUnassignedSpoolNote: '스풀을 할당하고 재개하세요. 필라멘트 사용량은 전량 기록됩니다.',
     trackingModeBuiltIn: '내장 인벤토리',
     trackingModeBuiltInDesc: 'RFID 자동 매칭 및 사용량 추적 포함',
     trackingModeSpoolmanDesc: '외부 필라멘트 관리 서버',

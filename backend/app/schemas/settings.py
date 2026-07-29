@@ -53,6 +53,13 @@ class AppSettings(BaseModel):
         default=False,
         description="When multiple AMS spools match, prefer the one with lowest remaining filament",
     )
+    pause_print_on_unassigned_spool: bool = Field(
+        default=False,
+        description=(
+            "Pause the print when it starts and a tray it uses has no assigned spool. "
+            "Assign the spool and resume — usage is still tracked in full."
+        ),
+    )
 
     # Updates
     check_updates: bool = Field(default=True, description="Automatically check for updates on startup")
@@ -494,6 +501,7 @@ class AppSettingsUpdate(BaseModel):
     auto_add_unknown_rfid: bool | None = None
     disable_filament_warnings: bool | None = None
     prefer_lowest_filament: bool | None = None
+    pause_print_on_unassigned_spool: bool | None = None
     check_updates: bool | None = None
     check_printer_firmware: bool | None = None
     include_beta_updates: bool | None = None

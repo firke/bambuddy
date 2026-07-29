@@ -62,6 +62,28 @@ class TestSettingsAPI:
 
     @pytest.mark.asyncio
     @pytest.mark.integration
+    async def test_pause_print_on_unassigned_spool_defaults_off(self, async_client: AsyncClient):
+        """The pause-on-unassigned-spool guard is opt-in — it must never pause by default."""
+        response = await async_client.get("/api/v1/settings/")
+
+        assert response.status_code == 200
+        assert response.json()["pause_print_on_unassigned_spool"] is False
+
+    @pytest.mark.asyncio
+    @pytest.mark.integration
+    async def test_update_pause_print_on_unassigned_spool(self, async_client: AsyncClient):
+        """Verify the toggle round-trips as a bool, not the raw stored string."""
+        response = await async_client.put("/api/v1/settings/", json={"pause_print_on_unassigned_spool": True})
+        assert response.status_code == 200
+        assert response.json()["pause_print_on_unassigned_spool"] is True
+
+        # Re-read: exercises the bool-coercion list in _build_settings_response.
+        response = await async_client.get("/api/v1/settings/")
+        assert response.status_code == 200
+        assert response.json()["pause_print_on_unassigned_spool"] is True
+
+    @pytest.mark.asyncio
+    @pytest.mark.integration
     async def test_update_currency(self, async_client: AsyncClient):
         """Verify currency can be updated."""
         response = await async_client.put("/api/v1/settings/", json={"currency": "EUR"})

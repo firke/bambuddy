@@ -355,6 +355,7 @@ export default {
     toast: {
       printerDeleted: 'Drucker gelöscht',
       missingSpoolAssignment: 'Druck gestartet auf {{printer}}. Fehlende Spulenzuordnung für: {{slots}}',
+      missingSpoolAssignmentPaused: 'Druck auf {{printer}} pausiert. Keine Spule zugeordnet für: {{slots}}. Spule zuordnen und dann fortsetzen.',
       assignmentVerified: 'Filament in Slot {{slot}} geladen ({{printer}})',
       assignmentVerifiedNoKprofile: 'Slot {{slot}} auf {{printer}} geladen, aber das Fluss-Kalibrierungsprofil (K-Profil) wurde nicht übernommen',
       assignmentNotConfirmed: 'Zuordnung für Slot {{slot}} auf {{printer}} konnte nicht bestätigt werden – bitte den AMS-Slot prüfen',
@@ -1866,6 +1867,9 @@ export default {
     preferLowestFilament: 'Niedrigsten Filamentrest bevorzugen',
     preferLowestFilamentDesc: 'Bei mehreren passenden Spulen die mit dem geringsten Restfilament verwenden',
     preferLowestFilamentBackupNote: 'Wirkt nur, wenn AMS Filament Backup am Drucker aktiviert ist — sonst kann der Drucker beim Aufbrauchen der ersten Spule nicht auf eine zweite Spule wechseln.',
+    pausePrintOnUnassignedSpool: 'Druck bei nicht zugeordneter Spule pausieren',
+    pausePrintOnUnassignedSpoolDesc: 'Druck beim Start pausieren, wenn ein verwendetes Fach keine zugeordnete Spule hat',
+    pausePrintOnUnassignedSpoolNote: 'Spule zuordnen und fortsetzen — der gesamte Filamentverbrauch wird weiterhin erfasst.',
     trackingModeBuiltIn: 'Integriertes Inventar',
     trackingModeBuiltInDesc: 'RFID-Erkennung und Verbrauchserfassung inklusive',
     trackingModeSpoolmanDesc: 'Externer Filament-Management-Server',

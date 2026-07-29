@@ -355,6 +355,7 @@ export default {
     toast: {
       printerDeleted: 'Yazıcı silindi',
       missingSpoolAssignment: '{{printer}} üzerinde baskı başladı. Şunlar için eksik makara ataması: {{slots}}',
+      missingSpoolAssignmentPaused: '{{printer}} üzerinde baskı duraklatıldı. Şunlar için makara atanmamış: {{slots}}. Bir makara atayın, sonra devam edin.',
       assignmentVerified: '{{slot}} yuvasına filament yüklendi ({{printer}})',
       assignmentVerifiedNoKprofile: '{{printer}} üzerindeki {{slot}} yuvası yüklendi, ancak akış kalibrasyonu profili (K profili) uygulanmadı',
       assignmentNotConfirmed: '{{printer}} üzerindeki {{slot}} yuvası ataması doğrulanamadı — AMS yuvasını kontrol edin',
@@ -1870,6 +1871,9 @@ export default {
     preferLowestFilament: 'En az kalan filamenti tercih et',
     preferLowestFilamentDesc: 'Birden fazla makara eşleştiğinde, kalan filamenti en az olanı kullan',
     preferLowestFilamentBackupNote: 'Yalnızca yazıcıda AMS Filament Backup etkinleştirildiğinde uygulanır — aksi takdirde seçilen makara bittiğinde yazıcı ikinci bir makaraya geçemez.',
+    pausePrintOnUnassignedSpool: 'Makara atanmamışsa baskıyı duraklat',
+    pausePrintOnUnassignedSpoolDesc: 'Kullanılan bir tepsiye makara atanmamışsa baskı başlarken duraklat',
+    pausePrintOnUnassignedSpoolNote: 'Makarayı atayıp devam edin — toplam filament tüketimi yine de kaydedilir.',
     trackingModeBuiltIn: 'Yerleşik Envanter',
     trackingModeBuiltInDesc: 'RFID otomatik eşleştirme ve kullanım takibi dahil',
     trackingModeSpoolmanDesc: 'Harici filament yönetim sunucusu',
