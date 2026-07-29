@@ -248,6 +248,30 @@ async def test_pause_enabled_but_all_trays_assigned_does_not_pause():
 
 
 @pytest.mark.asyncio
+async def test_unassigned_but_unused_tray_is_ignored():
+    """Only trays the job prints from matter.
+
+    Print uses A2 alone, and A2 is assigned. A1 has no spool bound but the job
+    never touches it, so it must not warn and must not pause — otherwise every
+    print on a partly-loaded AMS would stall.
+    """
+    logger = logging.getLogger(__name__)
+    data = {"ams_mapping": [1], "raw_data": {}}  # global tray 1 == A2 only
+    pause_calls = []
+    client = SimpleNamespace(pause_print=lambda: (pause_calls.append(1), True)[1])
+
+    # Only A2 is bound; A1 (global tray 0) is deliberately left unassigned.
+    session = _FakeSession("Printer A", legacy=[SimpleNamespace(ams_id=0, tray_id=1)])
+    p_session, p_status, p_ws, p_notify, p_setting, p_client = _pause_patches(session, "true", client)
+    with p_session, p_status, p_ws as mock_ws, p_notify as mock_notify, p_setting, p_client:
+        await check_spool_assignments_on_print_start(1, data, logger)
+
+    assert pause_calls == []
+    mock_ws.assert_not_awaited()
+    mock_notify.assert_not_awaited()
+
+
+@pytest.mark.asyncio
 async def test_no_resolvable_mapping_never_pauses():
     """Fail open: with no AMS mapping we can't tell which trays are used."""
     logger = logging.getLogger(__name__)
