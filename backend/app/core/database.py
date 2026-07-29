@@ -1010,11 +1010,17 @@ async def run_migrations(conn):
     except (OperationalError, ProgrammingError):
         pass  # Already applied
 
-    # Defaults to 1: a print paused waiting on a spool assignment is actionable,
-    # so existing providers opt in automatically (same reasoning as
-    # on_plate_not_empty). The warn-only sibling above stays default 0.
+    # Defaults to TRUE: a print paused waiting on a spool assignment is
+    # actionable, so existing providers opt in automatically (same reasoning as
+    # on_plate_not_empty). The warn-only sibling above stays default false.
+    #
+    # TRUE, not 1: PostgreSQL rejects an integer default on a boolean column
+    # ("column ... is of type boolean but default expression is of type
+    # integer") and _safe_execute re-raises it, aborting startup. SQLite accepts
+    # both. The older BOOLEAN DEFAULT 0/1 statements above are latent versions
+    # of the same bug — they only fire when the column is genuinely absent.
     await _safe_execute(
-        conn, "ALTER TABLE notification_providers ADD COLUMN on_print_paused_unassigned_spool BOOLEAN DEFAULT 1"
+        conn, "ALTER TABLE notification_providers ADD COLUMN on_print_paused_unassigned_spool BOOLEAN DEFAULT TRUE"
     )
 
     # Migration: Add project_id column to print_archives

@@ -10,10 +10,14 @@ upgraded installs pausing prints with no phone alert at all.
 
 from __future__ import annotations
 
+import re
+from unittest.mock import AsyncMock, MagicMock, patch
+
 import pytest
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import create_async_engine
 
+from backend.app.core import database as db_module
 from backend.app.core.database import run_migrations
 
 LEGACY_NOTIFICATION_PROVIDERS = """
@@ -136,3 +140,59 @@ async def test_migration_is_idempotent(legacy_engine):
             await conn.execute(text("SELECT on_print_paused_unassigned_spool FROM notification_providers WHERE id = 1"))
         ).scalar()
         assert value == 1
+
+
+class _AsyncCtxStub:
+    """Async context manager that does nothing — for ``begin_nested()``."""
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, *_exc):
+        return False
+
+
+async def _capture_sql() -> list[str]:
+    """Return every SQL string run_migrations would pass to _safe_execute.
+
+    Same harness as backend/tests/unit/test_oidc_icon_migration_pg.py — the
+    suite runs on SQLite, so dialect-specific SQL defects are otherwise
+    invisible until a PostgreSQL user upgrades.
+    """
+    executed: list[str] = []
+
+    async def fake_safe_execute(_conn, sql: str) -> None:
+        executed.append(sql)
+
+    fake_conn = MagicMock()
+    fake_conn.begin_nested = lambda: _AsyncCtxStub()
+    fake_conn.execute = AsyncMock(return_value=MagicMock(fetchone=MagicMock(return_value=None)))
+
+    with (
+        patch("backend.app.core.database.is_sqlite", return_value=False),
+        patch("backend.app.core.database._safe_execute", side_effect=fake_safe_execute),
+        patch("backend.app.core.database._migrate_update_auto_link_constraint", AsyncMock()),
+        patch("backend.app.core.database._migrate_widen_spoolman_slot_ams_id_range", AsyncMock()),
+    ):
+        await db_module.run_migrations(fake_conn)
+
+    return executed
+
+
+@pytest.mark.asyncio
+async def test_boolean_default_is_dialect_safe():
+    """The default must be the TRUE keyword, never the integer 1.
+
+    PostgreSQL rejects an integer default on a boolean column with
+    DatatypeMismatchError ("column ... is of type boolean but default
+    expression is of type integer"), and _safe_execute re-raises anything that
+    isn't an idempotency error — so `DEFAULT 1` aborts startup for every
+    PostgreSQL user upgrading into this column. SQLite accepts both, which is
+    why the rest of this file passes either way and this assertion is needed.
+    """
+    executed = await _capture_sql()
+    stmts = [s for s in executed if "on_print_paused_unassigned_spool" in s]
+
+    assert len(stmts) == 1, f"expected exactly one statement, got: {stmts!r}"
+    assert re.search(r"BOOLEAN\s+DEFAULT\s+TRUE\b", stmts[0], re.IGNORECASE), stmts[0]
+    assert not re.search(r"BOOLEAN\s+DEFAULT\s+[01]\b", stmts[0]), stmts[0]
