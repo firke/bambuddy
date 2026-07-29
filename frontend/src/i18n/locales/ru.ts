@@ -5188,6 +5188,8 @@ export default {
     firstLayerCompleteDescription: "Уведомить со снимком после завершения первого слоя",
     missingSpoolAssignmentLabel: "Катушка не назначена",
     missingSpoolAssignmentDescription: "Уведомить при запуске печати, если для необходимых слотов не назначены катушки",
+    pausedUnassignedSpoolLabel: 'Печать приостановлена - катушка не назначена',
+    pausedUnassignedSpoolDescription: 'Уведомлять, когда печать приостановлена из-за того, что нужному слоту не назначена катушка',
     printFailed: "Ошибка печати",
     printStopped: "Печать остановлена",
     progressMilestones: "Этапы выполнения",
@@ -5342,6 +5344,8 @@ export default {
       printer_error: "Ошибка принтера",
       filament_low: "Заканчивается филамент",
       maintenance_due: "Требуется обслуживание",
+      print_missing_spool_assignment: "Катушка не назначена",
+      print_paused_unassigned_spool: 'Печать приостановлена - катушка не назначена',
       test: "Тест",
     },
     userEmail: {

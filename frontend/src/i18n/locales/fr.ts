@@ -5470,6 +5470,8 @@ export default {
     firstLayerCompleteDescription: 'Notification avec photo après la première couche',
     missingSpoolAssignmentLabel: 'Affectation de bobine manquante',
     missingSpoolAssignmentDescription: 'Notifier quand une impression démarre et que des bacs requis n\'ont pas de bobine assignée',
+    pausedUnassignedSpoolLabel: 'Impression en pause - bobine non attribuée',
+    pausedUnassignedSpoolDescription: "Notifier lorsqu'une impression est mise en pause car un bac requis n'a pas de bobine attribuée",
     printFailed: 'Impression échouée',
     printStopped: 'Impression arrêtée',
     progressMilestones: 'Jalons de progression',
@@ -5635,6 +5637,8 @@ export default {
       printer_error: 'Erreur de l\'imprimante',
       filament_low: 'Filament bas',
       maintenance_due: 'Maintenance requise',
+      print_missing_spool_assignment: 'Affectation de bobine manquante',
+      print_paused_unassigned_spool: 'Impression en pause - bobine non attribuée',
       test: 'Tester',
     },
     // User email notification preferences

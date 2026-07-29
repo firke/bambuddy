@@ -66,6 +66,11 @@ class NotificationProvider(Base):
     on_print_stopped = Column(Boolean, default=True)  # User cancelled/stopped print
     on_print_progress = Column(Boolean, default=False)  # 25%, 50%, 75% milestones
     on_print_missing_spool_assignment = Column(Boolean, default=False)  # Print started with unassigned required tray(s)
+    # Print PAUSED because a required tray had no spool (pause_print_on_unassigned_spool).
+    # Defaults on, unlike the warn-only event above: the printer is sitting idle
+    # waiting for the user, so it warrants a push even if they never opted into
+    # the passive warning.
+    on_print_paused_unassigned_spool = Column(Boolean, default=True)
 
     # Event triggers - printer status
     on_printer_offline = Column(Boolean, default=False)

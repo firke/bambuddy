@@ -193,7 +193,15 @@ async def check_spool_assignments_on_print_start(
                 paused=paused,
             )
 
-            await notification_service.on_print_missing_spool_assignment(
+            # Exactly one of the two events fires: the paused one is actionable
+            # (printer stopped, waiting on the user) and has its own provider
+            # toggle, so sending both would double-notify.
+            notify = (
+                notification_service.on_print_paused_unassigned_spool
+                if paused
+                else notification_service.on_print_missing_spool_assignment
+            )
+            await notify(
                 printer_id=printer_id,
                 printer_name=printer_name,
                 missing_slots=missing_slots,

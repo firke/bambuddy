@@ -1010,6 +1010,13 @@ async def run_migrations(conn):
     except (OperationalError, ProgrammingError):
         pass  # Already applied
 
+    # Defaults to 1: a print paused waiting on a spool assignment is actionable,
+    # so existing providers opt in automatically (same reasoning as
+    # on_plate_not_empty). The warn-only sibling above stays default 0.
+    await _safe_execute(
+        conn, "ALTER TABLE notification_providers ADD COLUMN on_print_paused_unassigned_spool BOOLEAN DEFAULT 1"
+    )
+
     # Migration: Add project_id column to print_archives
     try:
         async with conn.begin_nested():

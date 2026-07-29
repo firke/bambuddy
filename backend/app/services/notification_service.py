@@ -1168,10 +1168,52 @@ class NotificationService:
         db: AsyncSession,
     ):
         """Handle print-start event when required trays are missing spool assignments."""
+        await self._notify_unassigned_spool(
+            printer_id=printer_id,
+            printer_name=printer_name,
+            missing_slots=missing_slots,
+            db=db,
+            trigger="on_print_missing_spool_assignment",
+            event_type="print_missing_spool_assignment",
+        )
+
+    async def on_print_paused_unassigned_spool(
+        self,
+        printer_id: int,
+        printer_name: str,
+        missing_slots: list[dict[str, str]],
+        db: AsyncSession,
+    ):
+        """Handle a print PAUSED because a required tray had no spool assigned.
+
+        Distinct from on_print_missing_spool_assignment so users can subscribe to
+        the actionable case (printer is stopped, waiting on them) without opting
+        into the passive warning. Exactly one of the two fires per print.
+        """
+        await self._notify_unassigned_spool(
+            printer_id=printer_id,
+            printer_name=printer_name,
+            missing_slots=missing_slots,
+            db=db,
+            trigger="on_print_paused_unassigned_spool",
+            event_type="print_paused_unassigned_spool",
+        )
+
+    async def _notify_unassigned_spool(
+        self,
+        printer_id: int,
+        printer_name: str,
+        missing_slots: list[dict[str, str]],
+        db: AsyncSession,
+        trigger: str,
+        event_type: str,
+    ):
+        """Shared body for the two unassigned-spool events — they differ only in
+        which provider toggle gates them and which template renders them."""
         if not missing_slots:
             return
 
-        providers = await self._get_providers_for_event(db, "on_print_missing_spool_assignment", printer_id)
+        providers = await self._get_providers_for_event(db, trigger, printer_id)
         if not providers:
             return
 
@@ -1189,13 +1231,13 @@ class NotificationService:
             "missing_slot_details": missing_profile_details,
         }
 
-        title, message = await self._build_message_from_template(db, "print_missing_spool_assignment", variables)
+        title, message = await self._build_message_from_template(db, event_type, variables)
         await self._send_to_providers(
             providers,
             title,
             message,
             db,
-            "print_missing_spool_assignment",
+            event_type,
             printer_id,
             printer_name,
             force_immediate=True,

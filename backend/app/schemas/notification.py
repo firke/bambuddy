@@ -39,6 +39,10 @@ class NotificationProviderBase(BaseModel):
         default=False,
         description="Notify when a print starts with required trays missing spool assignments",
     )
+    on_print_paused_unassigned_spool: bool = Field(
+        default=True,
+        description="Notify when a print is paused because a required tray has no assigned spool",
+    )
 
     # Event triggers - printer status
     on_printer_offline: bool = Field(default=False, description="Notify when printer goes offline")
@@ -128,6 +132,7 @@ class NotificationProviderUpdate(BaseModel):
     on_print_stopped: bool | None = None
     on_print_progress: bool | None = None
     on_print_missing_spool_assignment: bool | None = None
+    on_print_paused_unassigned_spool: bool | None = None
 
     # Event triggers - printer status
     on_printer_offline: bool | None = None

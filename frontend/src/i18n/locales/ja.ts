@@ -5481,6 +5481,8 @@ export default {
     firstLayerCompleteDescription: '第1層完了時にスナップショット付きで通知',
     missingSpoolAssignmentLabel: 'スプール割り当て不足',
     missingSpoolAssignmentDescription: '印刷開始時に必要トレイへスプールが未割り当ての場合に通知',
+    pausedUnassignedSpoolLabel: '印刷一時停止 - スプール未割り当て',
+    pausedUnassignedSpoolDescription: '必要なトレイにスプールが割り当てられていないため印刷が一時停止したときに通知します',
     printFailed: '印刷失敗',
     printStopped: '印刷停止',
     progressMilestones: '進捗マイルストーン',
@@ -5646,6 +5648,8 @@ export default {
       printer_error: 'プリンターエラー',
       filament_low: 'フィラメント残量低下',
       maintenance_due: 'メンテナンス期限',
+      print_missing_spool_assignment: 'スプール割り当て不足',
+      print_paused_unassigned_spool: '印刷一時停止 - スプール未割り当て',
       test: 'テスト',
     },
     // User email notification preferences

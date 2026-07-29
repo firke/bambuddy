@@ -62,6 +62,12 @@ DEFAULT_TEMPLATES = [
         "body_template": "{printer}: print started with missing spool assignments\nSlots: {missing_slots}\nExpected profile:\n{missing_slot_details}",
     },
     {
+        "event_type": "print_paused_unassigned_spool",
+        "name": "Print Paused - Unassigned Spool",
+        "title_template": "Print Paused - Unassigned Spool",
+        "body_template": "{printer}: print PAUSED - no spool assigned\nSlots: {missing_slots}\nExpected profile:\n{missing_slot_details}\n\nAssign the spool, then resume the print.",
+    },
+    {
         "event_type": "printer_offline",
         "name": "Printer Offline",
         "title_template": "Printer Offline",

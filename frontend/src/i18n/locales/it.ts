@@ -5469,6 +5469,8 @@ export default {
     firstLayerCompleteDescription: 'Notifica con foto al termine del primo strato',
     missingSpoolAssignmentLabel: 'Assegnazione bobina mancante',
     missingSpoolAssignmentDescription: 'Notifica quando una stampa parte e i vassoi richiesti non hanno una bobina assegnata',
+    pausedUnassignedSpoolLabel: 'Stampa in pausa - bobina non assegnata',
+    pausedUnassignedSpoolDescription: 'Notifica quando una stampa viene messa in pausa perché un vassoio necessario non ha una bobina assegnata',
     printFailed: 'Stampa fallita',
     printStopped: 'Stampa interrotta',
     progressMilestones: 'Traguardi di avanzamento',
@@ -5634,6 +5636,8 @@ export default {
       printer_error: 'Errore stampante',
       filament_low: 'Filamento scarso',
       maintenance_due: 'Manutenzione necessaria',
+      print_missing_spool_assignment: 'Assegnazione bobina mancante',
+      print_paused_unassigned_spool: 'Stampa in pausa - bobina non assegnata',
       test: 'Prova',
     },
     // User email notification preferences

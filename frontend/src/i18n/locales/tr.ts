@@ -5437,6 +5437,8 @@ export default {
     firstLayerCompleteDescription: 'İlk katman bittiğinde anlık görüntüyle bildir',
     missingSpoolAssignmentLabel: 'Eksik Makara Ataması',
     missingSpoolAssignmentDescription: 'Baskı başladığında ve gerekli tepsilerin atanmış makarası olmadığında bildir',
+    pausedUnassignedSpoolLabel: 'Baskı duraklatıldı - makara atanmamış',
+    pausedUnassignedSpoolDescription: 'Gerekli bir tepsiye makara atanmadığı için baskı duraklatıldığında bildir',
     printFailed: 'Baskı Başarısız',
     printStopped: 'Baskı Durduruldu',
     progressMilestones: 'İlerleme Kilometre Taşları',
@@ -5591,6 +5593,8 @@ export default {
       printer_error: 'Yazıcı Hatası',
       filament_low: 'Az Filament',
       maintenance_due: 'Bakım Zamanı',
+      print_missing_spool_assignment: 'Eksik Makara Ataması',
+      print_paused_unassigned_spool: 'Baskı duraklatıldı - makara atanmamış',
       test: 'Test',
     },
     userEmail: {

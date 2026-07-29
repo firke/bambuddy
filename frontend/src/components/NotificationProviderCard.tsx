@@ -168,6 +168,9 @@ export function NotificationProviderCard({ provider, onEdit }: NotificationProvi
             {provider.on_print_missing_spool_assignment && (
               <span className="px-2 py-0.5 bg-amber-100 dark:bg-amber-500/20 text-amber-700 dark:text-amber-300 text-xs rounded">{t('notifications.missingSpoolAssignmentLabel')}</span>
             )}
+            {provider.on_print_paused_unassigned_spool && (
+              <span className="px-2 py-0.5 bg-orange-100 dark:bg-orange-500/20 text-orange-700 dark:text-orange-300 text-xs rounded">{t('notifications.pausedUnassignedSpoolLabel')}</span>
+            )}
             {provider.on_stock_reorder_alert && (
               <span className="px-2 py-0.5 bg-lime-100 dark:bg-lime-500/20 text-lime-700 dark:text-lime-400 text-xs rounded">{t('notifications.stockReorderAlert')}</span>
             )}
@@ -318,6 +321,17 @@ export function NotificationProviderCard({ provider, onEdit }: NotificationProvi
                   <Toggle
                     checked={provider.on_print_missing_spool_assignment ?? false}
                     onChange={(checked) => updateMutation.mutate({ on_print_missing_spool_assignment: checked })}
+                  />
+                </div>
+
+                <div className="flex items-center justify-between">
+                  <div>
+                    <p className="text-sm text-white">{t('notifications.pausedUnassignedSpoolLabel')}</p>
+                    <p className="text-xs text-bambu-gray">{t('notifications.pausedUnassignedSpoolDescription')}</p>
+                  </div>
+                  <Toggle
+                    checked={provider.on_print_paused_unassigned_spool ?? true}
+                    onChange={(checked) => updateMutation.mutate({ on_print_paused_unassigned_spool: checked })}
                   />
                 </div>
 

@@ -16,6 +16,7 @@ class EventType(StrEnum):
     PRINT_STOPPED = "print_stopped"
     PRINT_PROGRESS = "print_progress"
     PRINT_MISSING_SPOOL_ASSIGNMENT = "print_missing_spool_assignment"
+    PRINT_PAUSED_UNASSIGNED_SPOOL = "print_paused_unassigned_spool"
     PRINTER_OFFLINE = "printer_offline"
     PRINTER_ERROR = "printer_error"
     FILAMENT_LOW = "filament_low"
@@ -64,6 +65,13 @@ EVENT_VARIABLES: dict[str, list[str]] = {
     ],
     "print_progress": ["printer", "filename", "progress", "remaining_time", "eta", "timestamp", "app_name"],
     "print_missing_spool_assignment": [
+        "printer",
+        "missing_slots",
+        "missing_slot_details",
+        "timestamp",
+        "app_name",
+    ],
+    "print_paused_unassigned_spool": [
         "printer",
         "missing_slots",
         "missing_slot_details",
@@ -149,6 +157,13 @@ SAMPLE_DATA: dict[str, dict[str, str]] = {
         "app_name": "Bambuddy",
     },
     "print_missing_spool_assignment": {
+        "printer": "Bambu X1C",
+        "missing_slots": "A1, A3",
+        "missing_slot_details": "- A1: PLA Basic\n- A3: PETG HF",
+        "timestamp": "2024-01-15 14:30",
+        "app_name": "Bambuddy",
+    },
+    "print_paused_unassigned_spool": {
         "printer": "Bambu X1C",
         "missing_slots": "A1, A3",
         "missing_slot_details": "- A1: PLA Basic\n- A3: PETG HF",

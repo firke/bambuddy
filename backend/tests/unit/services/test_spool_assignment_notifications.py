@@ -90,7 +90,11 @@ async def test_missing_assignment_broadcasts_websocket_event_and_push_notificati
 
 
 def _patches(session):
-    """Common patch set: the fake session + stubbed printer state / emitters."""
+    """Common patch set: the fake session + stubbed printer state / emitters.
+
+    Both notification events are patched — the service picks exactly one of them
+    depending on whether it paused, so tests assert on which was chosen.
+    """
     return (
         patch(
             "backend.app.services.spool_assignment_notifications.async_session",
@@ -103,6 +107,10 @@ def _patches(session):
         ),
         patch(
             "backend.app.services.spool_assignment_notifications.notification_service.on_print_missing_spool_assignment",
+            new_callable=AsyncMock,
+        ),
+        patch(
+            "backend.app.services.spool_assignment_notifications.notification_service.on_print_paused_unassigned_spool",
             new_callable=AsyncMock,
         ),
     )
@@ -122,8 +130,8 @@ async def test_spoolman_only_assignment_suppresses_notification():
         legacy=[],
         spoolman=[SimpleNamespace(ams_id=0, tray_id=0), SimpleNamespace(ams_id=0, tray_id=1)],
     )
-    p_session, p_status, p_ws, p_notify = _patches(session)
-    with p_session, p_status, p_ws as mock_ws, p_notify as mock_notify:
+    p_session, p_status, p_ws, p_notify, p_paused = _patches(session)
+    with p_session, p_status, p_ws as mock_ws, p_notify as mock_notify, p_paused:
         await check_spool_assignments_on_print_start(1, data, logger)
 
     mock_ws.assert_not_awaited()
@@ -142,8 +150,8 @@ async def test_spoolman_partial_coverage_flags_only_uncovered_tray():
         legacy=[],
         spoolman=[SimpleNamespace(ams_id=0, tray_id=0)],  # A1 only
     )
-    p_session, p_status, p_ws, p_notify = _patches(session)
-    with p_session, p_status, p_ws as mock_ws, p_notify as mock_notify:
+    p_session, p_status, p_ws, p_notify, p_paused = _patches(session)
+    with p_session, p_status, p_ws as mock_ws, p_notify as mock_notify, p_paused:
         await check_spool_assignments_on_print_start(1, data, logger)
 
     mock_ws.assert_awaited_once()
@@ -163,8 +171,8 @@ async def test_mixed_mode_union_covers_all_used_trays():
         legacy=[SimpleNamespace(ams_id=0, tray_id=0)],  # A1
         spoolman=[SimpleNamespace(ams_id=0, tray_id=1)],  # A2
     )
-    p_session, p_status, p_ws, p_notify = _patches(session)
-    with p_session, p_status, p_ws as mock_ws, p_notify as mock_notify:
+    p_session, p_status, p_ws, p_notify, p_paused = _patches(session)
+    with p_session, p_status, p_ws as mock_ws, p_notify as mock_notify, p_paused:
         await check_spool_assignments_on_print_start(1, data, logger)
 
     mock_ws.assert_not_awaited()
@@ -199,12 +207,17 @@ async def test_pause_disabled_by_default_leaves_print_running():
     data = {"ams_mapping": [0, 1], "raw_data": {}}
     client = SimpleNamespace(pause_print=lambda: True)
 
-    p_session, p_status, p_ws, p_notify, p_setting, p_client = _pause_patches(_missing_a2_session(), None, client)
-    with p_session, p_status, p_ws as mock_ws, p_notify, p_setting, p_client:
+    p_session, p_status, p_ws, p_notify, p_paused, p_setting, p_client = _pause_patches(
+        _missing_a2_session(), None, client
+    )
+    with p_session, p_status, p_ws as mock_ws, p_notify as mock_notify, p_paused as mock_paused, p_setting, p_client:
         await check_spool_assignments_on_print_start(1, data, logger)
 
     mock_ws.assert_awaited_once()
     assert mock_ws.await_args.kwargs["paused"] is False
+    # Warn-only event; the paused event must stay silent.
+    mock_notify.assert_awaited_once()
+    mock_paused.assert_not_awaited()
 
 
 @pytest.mark.asyncio
@@ -215,16 +228,21 @@ async def test_pause_enabled_pauses_print_and_flags_websocket_event():
     pause_calls = []
     client = SimpleNamespace(pause_print=lambda: (pause_calls.append(1), True)[1])
 
-    p_session, p_status, p_ws, p_notify, p_setting, p_client = _pause_patches(_missing_a2_session(), "true", client)
-    with p_session, p_status, p_ws as mock_ws, p_notify as mock_notify, p_setting, p_client:
+    p_session, p_status, p_ws, p_notify, p_paused, p_setting, p_client = _pause_patches(
+        _missing_a2_session(), "true", client
+    )
+    with p_session, p_status, p_ws as mock_ws, p_notify as mock_notify, p_paused as mock_paused, p_setting, p_client:
         await check_spool_assignments_on_print_start(1, data, logger)
 
     assert pause_calls == [1]
     mock_ws.assert_awaited_once()
     assert mock_ws.await_args.kwargs["paused"] is True
     assert mock_ws.await_args.kwargs["missing_slots"] == [{"slot": "A2", "profile": "Unknown", "color": "Unknown"}]
-    # The warning notification still fires — pausing supplements it, not replaces it.
-    mock_notify.assert_awaited_once()
+    # The paused event fires *instead of* the warn-only one — never both, or the
+    # user gets two pushes for one print.
+    mock_paused.assert_awaited_once()
+    assert mock_paused.await_args.kwargs["missing_slots"] == [{"slot": "A2", "profile": "Unknown", "color": "Unknown"}]
+    mock_notify.assert_not_awaited()
 
 
 @pytest.mark.asyncio
@@ -239,8 +257,8 @@ async def test_pause_enabled_but_all_trays_assigned_does_not_pause():
         "Printer A",
         legacy=[SimpleNamespace(ams_id=0, tray_id=0), SimpleNamespace(ams_id=0, tray_id=1)],
     )
-    p_session, p_status, p_ws, p_notify, p_setting, p_client = _pause_patches(session, "true", client)
-    with p_session, p_status, p_ws as mock_ws, p_notify, p_setting, p_client:
+    p_session, p_status, p_ws, p_notify, p_paused, p_setting, p_client = _pause_patches(session, "true", client)
+    with p_session, p_status, p_ws as mock_ws, p_notify, p_paused, p_setting, p_client:
         await check_spool_assignments_on_print_start(1, data, logger)
 
     assert pause_calls == []
@@ -262,13 +280,14 @@ async def test_unassigned_but_unused_tray_is_ignored():
 
     # Only A2 is bound; A1 (global tray 0) is deliberately left unassigned.
     session = _FakeSession("Printer A", legacy=[SimpleNamespace(ams_id=0, tray_id=1)])
-    p_session, p_status, p_ws, p_notify, p_setting, p_client = _pause_patches(session, "true", client)
-    with p_session, p_status, p_ws as mock_ws, p_notify as mock_notify, p_setting, p_client:
+    p_session, p_status, p_ws, p_notify, p_paused, p_setting, p_client = _pause_patches(session, "true", client)
+    with p_session, p_status, p_ws as mock_ws, p_notify as mock_notify, p_paused as mock_paused, p_setting, p_client:
         await check_spool_assignments_on_print_start(1, data, logger)
 
     assert pause_calls == []
     mock_ws.assert_not_awaited()
     mock_notify.assert_not_awaited()
+    mock_paused.assert_not_awaited()
 
 
 @pytest.mark.asyncio
@@ -279,8 +298,10 @@ async def test_no_resolvable_mapping_never_pauses():
     pause_calls = []
     client = SimpleNamespace(pause_print=lambda: (pause_calls.append(1), True)[1])
 
-    p_session, p_status, p_ws, p_notify, p_setting, p_client = _pause_patches(_missing_a2_session(), "true", client)
-    with p_session, p_status, p_ws as mock_ws, p_notify, p_setting, p_client:
+    p_session, p_status, p_ws, p_notify, p_paused, p_setting, p_client = _pause_patches(
+        _missing_a2_session(), "true", client
+    )
+    with p_session, p_status, p_ws as mock_ws, p_notify, p_paused, p_setting, p_client:
         await check_spool_assignments_on_print_start(1, data, logger)
 
     assert pause_calls == []
@@ -294,13 +315,18 @@ async def test_pause_command_rejected_still_warns():
     data = {"ams_mapping": [0, 1], "raw_data": {}}
     client = SimpleNamespace(pause_print=lambda: False)  # e.g. printer disconnected
 
-    p_session, p_status, p_ws, p_notify, p_setting, p_client = _pause_patches(_missing_a2_session(), "true", client)
-    with p_session, p_status, p_ws as mock_ws, p_notify as mock_notify, p_setting, p_client:
+    p_session, p_status, p_ws, p_notify, p_paused, p_setting, p_client = _pause_patches(
+        _missing_a2_session(), "true", client
+    )
+    with p_session, p_status, p_ws as mock_ws, p_notify as mock_notify, p_paused as mock_paused, p_setting, p_client:
         await check_spool_assignments_on_print_start(1, data, logger)
 
     mock_ws.assert_awaited_once()
     assert mock_ws.await_args.kwargs["paused"] is False
+    # It never actually paused, so the user must get the warn-only push, not the
+    # "print paused, go assign a spool" one.
     mock_notify.assert_awaited_once()
+    mock_paused.assert_not_awaited()
 
 
 @pytest.mark.asyncio
@@ -309,13 +335,16 @@ async def test_no_mqtt_client_still_warns():
     logger = logging.getLogger(__name__)
     data = {"ams_mapping": [0, 1], "raw_data": {}}
 
-    p_session, p_status, p_ws, p_notify, p_setting, p_client = _pause_patches(_missing_a2_session(), "true", None)
-    with p_session, p_status, p_ws as mock_ws, p_notify as mock_notify, p_setting, p_client:
+    p_session, p_status, p_ws, p_notify, p_paused, p_setting, p_client = _pause_patches(
+        _missing_a2_session(), "true", None
+    )
+    with p_session, p_status, p_ws as mock_ws, p_notify as mock_notify, p_paused as mock_paused, p_setting, p_client:
         await check_spool_assignments_on_print_start(1, data, logger)
 
     mock_ws.assert_awaited_once()
     assert mock_ws.await_args.kwargs["paused"] is False
     mock_notify.assert_awaited_once()
+    mock_paused.assert_not_awaited()
 
 
 @pytest.mark.asyncio
@@ -324,12 +353,13 @@ async def test_setting_lookup_failure_does_not_suppress_warning():
     logger = logging.getLogger(__name__)
     data = {"ams_mapping": [0, 1], "raw_data": {}}
 
-    p_session, p_status, p_ws, p_notify = _patches(_missing_a2_session())
+    p_session, p_status, p_ws, p_notify, p_paused = _patches(_missing_a2_session())
     with (
         p_session,
         p_status,
         p_ws as mock_ws,
         p_notify as mock_notify,
+        p_paused,
         patch(
             "backend.app.api.routes.settings.get_setting",
             new_callable=AsyncMock,

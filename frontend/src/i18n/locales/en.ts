@@ -5524,6 +5524,8 @@ export default {
     firstLayerCompleteDescription: 'Notify with snapshot when first layer finishes',
     missingSpoolAssignmentLabel: 'Missing Spool Assignment',
     missingSpoolAssignmentDescription: 'Notify when print starts and required trays have no assigned spool',
+    pausedUnassignedSpoolLabel: 'Print Paused - Unassigned Spool',
+    pausedUnassignedSpoolDescription: 'Notify when a print is paused because a required tray has no assigned spool',
     printFailed: 'Print Failed',
     printStopped: 'Print Stopped',
     progressMilestones: 'Progress Milestones',
@@ -5689,6 +5691,8 @@ export default {
       printer_error: 'Printer Error',
       filament_low: 'Low Filament',
       maintenance_due: 'Maintenance Due',
+      print_missing_spool_assignment: 'Missing Spool Assignment',
+      print_paused_unassigned_spool: 'Print Paused - Unassigned Spool',
       test: 'Test',
     },
     // User email notification preferences

@@ -5480,6 +5480,8 @@ export default {
     firstLayerCompleteDescription: 'Benachrichtigung mit Foto nach erster Schicht',
     missingSpoolAssignmentLabel: 'Fehlende Spulenzuordnung',
     missingSpoolAssignmentDescription: 'Benachrichtigen, wenn ein Druck startet und benoetigte Schaechte keine zugeordnete Spule haben',
+    pausedUnassignedSpoolLabel: 'Druck pausiert - Spule nicht zugeordnet',
+    pausedUnassignedSpoolDescription: 'Benachrichtigen, wenn ein Druck pausiert wird, weil einem benoetigten Schacht keine Spule zugeordnet ist',
     printFailed: 'Druck fehlgeschlagen',
     printStopped: 'Druck gestoppt',
     progressMilestones: 'Fortschrittsmeilensteine',
@@ -5645,6 +5647,8 @@ export default {
       printer_error: 'Druckerfehler',
       filament_low: 'Filament niedrig',
       maintenance_due: 'Wartung fällig',
+      print_missing_spool_assignment: 'Fehlende Spulenzuordnung',
+      print_paused_unassigned_spool: 'Druck pausiert - Spule nicht zugeordnet',
       test: 'Test',
     },
     // User email notification preferences

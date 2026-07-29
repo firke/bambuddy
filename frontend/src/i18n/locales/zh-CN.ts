@@ -5469,6 +5469,8 @@ export default {
     firstLayerCompleteDescription: '首层完成时发送带照片的通知',
     missingSpoolAssignmentLabel: '缺少料卷分配',
     missingSpoolAssignmentDescription: '当打印开始且所需料盘没有分配料卷时发送通知',
+    pausedUnassignedSpoolLabel: '打印已暂停 - 未分配料卷',
+    pausedUnassignedSpoolDescription: '当所需料盘没有分配料卷导致打印暂停时发送通知',
     printFailed: '打印失败',
     printStopped: '打印已停止',
     progressMilestones: '进度里程碑',
@@ -5634,6 +5636,8 @@ export default {
       printer_error: '打印机错误',
       filament_low: '耗材不足',
       maintenance_due: '需要维护',
+      print_missing_spool_assignment: '缺少料卷分配',
+      print_paused_unassigned_spool: '打印已暂停 - 未分配料卷',
       test: '测试',
     },
     userEmail: {

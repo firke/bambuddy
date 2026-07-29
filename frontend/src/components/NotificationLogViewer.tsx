@@ -14,6 +14,8 @@ const EVENT_COLORS: Record<string, string> = {
   print_failed: 'text-red-700 dark:text-red-400',
   print_stopped: 'text-orange-700 dark:text-orange-400',
   print_progress: 'text-yellow-700 dark:text-yellow-400',
+  print_missing_spool_assignment: 'text-amber-700 dark:text-amber-300',
+  print_paused_unassigned_spool: 'text-orange-700 dark:text-orange-300',
   printer_offline: 'text-gray-400',
   printer_error: 'text-rose-700 dark:text-rose-400',
   filament_low: 'text-cyan-700 dark:text-cyan-400',

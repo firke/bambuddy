@@ -5201,6 +5201,8 @@ export default {
     firstLayerCompleteDescription: '첫 번째 레이어 완료 시 스냅샷과 함께 알림',
     missingSpoolAssignmentLabel: '스풀 할당 누락',
     missingSpoolAssignmentDescription: '인쇄 시작 시 필요한 트레이에 할당된 스풀이 없을 때 알림',
+    pausedUnassignedSpoolLabel: '인쇄 일시정지 - 스풀 미할당',
+    pausedUnassignedSpoolDescription: '필요한 트레이에 할당된 스풀이 없어 인쇄가 일시정지될 때 알림',
     printFailed: '인쇄 실패',
     printStopped: '인쇄 중지됨',
     progressMilestones: '진행률 이정표',
@@ -5355,6 +5357,8 @@ export default {
       printer_error: '프린터 오류',
       filament_low: '필라멘트 부족',
       maintenance_due: '유지 관리 필요',
+      print_missing_spool_assignment: '스풀 할당 누락',
+      print_paused_unassigned_spool: '인쇄 일시정지 - 스풀 미할당',
       test: '테스트'
     },
     userEmail: {

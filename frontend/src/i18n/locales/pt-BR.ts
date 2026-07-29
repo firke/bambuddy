@@ -5469,6 +5469,8 @@ export default {
     firstLayerCompleteDescription: 'Notificar com foto quando a primeira camada terminar',
     missingSpoolAssignmentLabel: 'Atribuição de bobina ausente',
     missingSpoolAssignmentDescription: 'Notificar quando a impressão iniciar e bandejas necessárias não tiverem bobina atribuída',
+    pausedUnassignedSpoolLabel: 'Impressão pausada - bobina não atribuída',
+    pausedUnassignedSpoolDescription: 'Notificar quando uma impressão for pausada porque uma bandeja necessária não tem bobina atribuída',
     printFailed: 'Impressão Falhou',
     printStopped: 'Impressão Parada',
     progressMilestones: 'Marcos de Progresso',
@@ -5634,6 +5636,8 @@ export default {
       printer_error: 'Erro da Impressora',
       filament_low: 'Filamento Baixo',
       maintenance_due: 'Manutenção Necessária',
+      print_missing_spool_assignment: 'Atribuição de bobina ausente',
+      print_paused_unassigned_spool: 'Impressão pausada - bobina não atribuída',
       test: 'Teste',
     },
     // User email notification preferences
