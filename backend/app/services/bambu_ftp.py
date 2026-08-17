@@ -88,6 +88,37 @@ class DeleteResult(Enum):
     FAILED = "failed"
 
 
+# How long to stop opening FTPS connections to a printer after its TLS
+# handshake failed (#2780).
+#
+# ``WRONG_VERSION_NUMBER`` on port 990 means the printer answered with
+# something that is not a TLS record at all, so no path, retry or SSL option
+# gets further. Two support bundles show that state lasting for days: one X2D
+# served clean FTPS for five days, flipped on 2026-07-19, and then failed every
+# single handshake for the next eight (zero successes, 3511 failures).
+#
+# What it is NOT is a wedged file service, which is what this comment used to
+# claim. #2780's reporter power-cycled both affected printers and the state
+# survived it, and ``openssl s_client`` against the same port completes a clean
+# handshake and returns a valid certificate while Bambuddy is failing. The
+# leading theory is now a connection-count refusal — vsFTPd answers one in
+# cleartext, which is exactly this error to an implicit-TLS client, and answers
+# the global limit by accepting and never speaking, which is the handshake
+# timeout we also see. Unproven: confirming it needs a capture taken while a
+# printer is in the failing state.
+#
+# Without a gate every candidate path re-runs the same doomed handshake: the
+# 3MF lookup alone walks 6 filename variants x 5 directories x 4 retries, and
+# the cover and timelapse scans run their own sweeps on top. That is where
+# those thousands of failures come from — one wedged printer, hammered.
+#
+# Five minutes is short enough that a power-cycled printer is picked up on the
+# next print (and any successful connect clears the gate immediately), long
+# enough that a wedged one is contacted twice an hour instead of hundreds of
+# times a minute.
+_HANDSHAKE_COOLOFF_SECONDS = 300.0
+
+
 class FileNotOnPrinterError(Exception):
     """Raised when a remote FTP path returns 550 (file not found).
 
@@ -190,6 +221,10 @@ class BambuFTPClient:
     # Maps IP -> "prot_p" or "prot_c"
     _mode_cache: dict[str, str] = {}
 
+    # Printers whose FTPS handshake just failed, mapped to the monotonic time
+    # their cool-off expires. See ``_HANDSHAKE_COOLOFF_SECONDS``.
+    _handshake_blocked_until: dict[str, float] = {}
+
     def __init__(
         self,
         ip_address: str,
@@ -233,8 +268,36 @@ class BambuFTPClient:
         # Default: try prot_p first (will fall back if needed)
         return False
 
+    @classmethod
+    def handshake_blocked(cls, ip_address: str) -> bool:
+        """True while *ip_address* is inside its post-handshake-failure cool-off.
+
+        Public so a caller sweeping many candidate paths can stop after the
+        first one rather than walking the rest against a printer that cannot
+        complete a TLS handshake (#2780).
+        """
+        deadline = cls._handshake_blocked_until.get(ip_address)
+        if deadline is None:
+            return False
+        if time.monotonic() >= deadline:
+            # Drop it on the way past rather than leaving an entry per printer
+            # this process has ever failed against.
+            del cls._handshake_blocked_until[ip_address]
+            return False
+        return True
+
     def connect(self) -> bool:
-        """Connect to the printer FTP server (implicit FTPS on port 990)."""
+        """Connect to the printer FTP server (implicit FTPS on port 990).
+
+        Returns False without touching the network while the printer is inside
+        the cool-off a previous TLS handshake failure opened (#2780).
+        """
+        if self.handshake_blocked(self.ip_address):
+            logger.debug(
+                "FTP connect to %s skipped: FTPS handshake failed recently, cooling off",
+                self.ip_address,
+            )
+            return False
         try:
             use_prot_c = self._should_use_prot_c()
             from backend.app.services.ftp_profiles import get_ftp_profile
@@ -270,20 +333,66 @@ class BambuFTPClient:
             return True
         except ftplib.error_perm as e:
             logger.warning("FTP connection permission error to %s: %s", self.ip_address, e)
-            self._ftp = None
+            self._abandon_connection()
             return False
         except TimeoutError as e:
             logger.warning("FTP connection timed out to %s: %s", self.ip_address, e)
-            self._ftp = None
+            self._abandon_connection()
             return False
         except ssl.SSLError as e:
-            logger.warning("FTP SSL error connecting to %s: %s", self.ip_address, e)
-            self._ftp = None
+            # Not a transient failure and not something another path or another
+            # retry can route around: the printer's file service answered port
+            # 990 with something that isn't TLS. Say so once and stop knocking
+            # for a while (#2780).
+            #
+            # Deliberately no advice about what to do. This message used to
+            # tell the operator to restart the printer; #2780's reporter did
+            # that twice, to no effect, and a single manual connect to the
+            # same printer completes a clean handshake. We do not yet know the
+            # trigger, so stating the observation and stopping there beats
+            # sending people to do the one thing already known not to work.
+            logger.warning(
+                "FTP SSL error connecting to %s: %s — the printer answered port %s with something "
+                "that is not TLS, so print files, covers and timelapses cannot be fetched from it. "
+                "Pausing FTP to this printer for %.0fs.",
+                self.ip_address,
+                e,
+                self.FTP_PORT,
+                _HANDSHAKE_COOLOFF_SECONDS,
+            )
+            self._handshake_blocked_until[self.ip_address] = time.monotonic() + _HANDSHAKE_COOLOFF_SECONDS
+            self._abandon_connection()
             return False
         except (OSError, ftplib.Error) as e:
             logger.warning("FTP connection failed to %s: %s (type: %s)", self.ip_address, e, type(e).__name__)
-            self._ftp = None
+            self._abandon_connection()
             return False
+
+    def _abandon_connection(self) -> None:
+        """Drop a connection that never became usable, closing its socket.
+
+        Every failure path in :meth:`connect` used to clear ``self._ftp`` and
+        nothing else, leaving a connected socket for the garbage collector.
+        That is survivable once; it is not survivable at this volume. A single
+        print used to walk ~110 candidate paths, so a printer refusing FTPS
+        got ~110 sockets opened and abandoned in a couple of minutes, and one
+        support bundle recorded 1813 of them in a day (#2780). If the refusal
+        is the printer running out of connection slots -- which fits the
+        evidence better than a wedged service, since a single manual connect
+        to the same printer succeeds -- then abandoning sockets is not just
+        untidy, it is what keeps the printer refusing.
+
+        Uses ``close()`` rather than ``quit()``: QUIT is a command, and there
+        is no working control channel to send it on.
+        """
+        ftp = self._ftp
+        self._ftp = None
+        if ftp is None:
+            return
+        try:
+            ftp.close()
+        except (OSError, ftplib.Error, EOFError):
+            pass  # Best-effort; the socket may already be gone
 
     def disconnect(self):
         """Disconnect from the FTP server."""
@@ -291,7 +400,10 @@ class BambuFTPClient:
             try:
                 self._ftp.quit()
             except (OSError, ftplib.Error, EOFError):
-                pass  # Best-effort FTP cleanup; connection may already be closed
+                # ``quit()`` sends QUIT and only then closes; when the send
+                # raises, ftplib never reaches its own close and the socket
+                # stays open. Close it here rather than leaving it to the GC.
+                self._abandon_connection()
             self._ftp = None
 
     def list_files(self, path: str = "/") -> list[dict]:
@@ -353,17 +465,42 @@ class BambuFTPClient:
 
         return files
 
-    def download_file(self, remote_path: str) -> bytes | None:
-        """Download a file from the printer."""
+    def download_file(self, remote_path: str, expected_size: int | None = None) -> bytes | None:
+        """Download a file from the printer.
+
+        ``expected_size`` is the byte count the directory listing reported for
+        this file. Pass it whenever a short read must not be mistaken for a
+        successful download: an FTPS data connection that closes early does
+        not always raise, so ``retrbinary`` can hand back a partial buffer that
+        looks like a perfectly good file to everything downstream. That is
+        tolerable when the printer keeps its copy, and not tolerable when the
+        caller goes on to delete the source (#2704).
+
+        A zero-byte result is always treated as a failure, matching
+        :meth:`download_to_file` — no caller has a use for an empty file.
+        """
         if not self._ftp:
             return None
 
         try:
             buffer = BytesIO()
             self._ftp.retrbinary(f"RETR {remote_path}", buffer.write)
-            return buffer.getvalue()
+            data = buffer.getvalue()
         except (OSError, ftplib.Error):
             return None
+
+        if not data:
+            logger.warning("FTP download returned 0 bytes for %s", remote_path)
+            return None
+        if expected_size is not None and len(data) != expected_size:
+            logger.warning(
+                "FTP download of %s is short: got %s bytes, listing reported %s — treating as failed",
+                remote_path,
+                len(data),
+                expected_size,
+            )
+            return None
+        return data
 
     def download_to_file(self, remote_path: str, local_path: Path) -> bool:
         """Download a file from the printer to local filesystem."""
@@ -789,6 +926,16 @@ class BambuFTPClient:
             pass  # Storage scan failed; return whatever info was collected above
 
         return result if result else None
+
+
+def ftps_handshake_blocked(ip_address: str) -> bool:
+    """True while this printer's FTPS handshake cool-off is still running.
+
+    Callers that walk a list of candidate paths use this to give up on the
+    remaining candidates: the failure is at the transport, below any path, so
+    every one of them would fail identically (#2780).
+    """
+    return BambuFTPClient.handshake_blocked(ip_address)
 
 
 # Shared 3MF download cache (#972).
@@ -1301,6 +1448,7 @@ async def download_file_bytes_async(
     socket_timeout: float | None = None,
     printer_model: str | None = None,
     timeout: float = 300.0,
+    expected_size: int | None = None,
 ) -> bytes | None:
     """Async wrapper for downloading file as bytes.
 
@@ -1313,6 +1461,9 @@ async def download_file_bytes_async(
             video, gcode) which can legitimately take minutes over slow Wi-Fi —
             the cap only guards against a permanently-starved pool, not a
             slow-but-progressing transfer.
+        expected_size: size from the directory listing; a mismatch fails the
+            download instead of returning a truncated file. See
+            :meth:`BambuFTPClient.download_file`.
     """
     loop = asyncio.get_event_loop()
 
@@ -1320,7 +1471,7 @@ async def download_file_bytes_async(
         client = BambuFTPClient(ip_address, access_code, timeout=socket_timeout, printer_model=printer_model)
         if client.connect():
             try:
-                return client.download_file(remote_path)
+                return client.download_file(remote_path, expected_size=expected_size)
             finally:
                 client.disconnect()
         return None
@@ -1330,6 +1481,121 @@ async def download_file_bytes_async(
     except TimeoutError:
         logger.warning("FTP download_bytes exceeded its %ss cap for %s (#2572)", timeout, ip_address)
         return None
+
+
+async def remote_file_settled(
+    ip_address: str,
+    access_code: str,
+    remote_path: str,
+    downloaded_bytes: int,
+    *,
+    printer_model: str | None = None,
+) -> bool:
+    """Confirm the printer has finished writing the file we just downloaded.
+
+    Matching the download against the size from the directory listing proves we
+    received what the listing *said*, not that the file was *finished*. The
+    timelapse scan's first look happens seconds after the print ends, which is
+    exactly when the printer is writing the video — so a file still growing can
+    be listed at a partial size, served at that size, and pass the length check
+    as a complete video (#2704).
+
+    That was survivable while the printer kept its copy. It isn't now that a
+    successful attach deletes the source, so re-list afterwards: if the file has
+    grown, what we hold is a prefix and the caller should discard it and try
+    again on the next round.
+
+    Returns True when the remote file can no longer differ from what we hold —
+    the size still matches, or the file is gone from the listing entirely and
+    so cannot grow any further. Returns False when it has changed size, and on
+    a listing failure, because "we could not check" must not read as "safe to
+    delete".
+    """
+    directory, _, name = remote_path.rpartition("/")
+    files = await list_files_async(ip_address, access_code, directory or "/", printer_model=printer_model)
+    if not files:
+        logger.warning("[TIMELAPSE] Could not re-list %s to confirm %s is complete", directory or "/", name)
+        return False
+
+    for f in files:
+        if f.get("name") == name:
+            size = f.get("size")
+            if size == downloaded_bytes:
+                return True
+            logger.info(
+                "[TIMELAPSE] %s is still being written (%s bytes now, %s when downloaded) — will retry",
+                name,
+                size,
+                downloaded_bytes,
+            )
+            return False
+
+    # Vanished between the download and now. Nothing left that could grow, and
+    # nothing left to delete either.
+    logger.debug("[TIMELAPSE] %s is no longer on the printer after download", name)
+    return True
+
+
+async def delete_archived_timelapse(
+    ip_address: str,
+    access_code: str,
+    remote_path: str,
+    *,
+    verified: bool,
+    printer_model: str | None = None,
+    printer_name: str = "",
+) -> bool:
+    """Remove a timelapse from the printer once it is safely in the archive.
+
+    Call this only after the attach succeeded (#2704). Keeping ``/timelapse``
+    down to just the unclaimed videos is what makes the snapshot diff
+    unambiguous rather than merely usually-right, and it stops P1S cards
+    filling with AVIs.
+
+    ``verified`` must say whether the downloaded byte count was checked against
+    the size the directory listing reported. It is required rather than
+    defaulted because this is the one irreversible step in the flow: an FTPS
+    data connection that closes early does not always raise, so an unverified
+    transfer can be a partial file that looks complete, and deleting the source
+    would then destroy the only good copy. The check lives here rather than at
+    each call site so no future caller can omit it.
+
+    Best-effort otherwise: a printer that refuses the delete keeps its copy, the
+    diff still excludes that filename next time because it is attached to an
+    archive, and nothing else in the flow cares. Returns True only on an actual
+    delete or a 550 (already gone).
+    """
+    if not verified:
+        logger.warning(
+            "[TIMELAPSE] Not deleting %s from printer %s: the download was never size-checked",
+            remote_path,
+            printer_name,
+        )
+        return False
+
+    for attempt in range(1, 4):
+        try:
+            result = await delete_file_async(ip_address, access_code, remote_path, printer_model=printer_model)
+        except Exception as e:
+            result = DeleteResult.FAILED
+            logger.warning("[TIMELAPSE] Delete attempt %d/3 raised for %s: %s", attempt, remote_path, e)
+
+        if result == DeleteResult.DELETED:
+            logger.info("[TIMELAPSE] Deleted %s from printer %s after archiving", remote_path, printer_name)
+            return True
+        if result == DeleteResult.NOT_FOUND:
+            # 550 never recovers by waiting — the printer already cleaned up.
+            logger.debug("[TIMELAPSE] %s already gone from printer %s", remote_path, printer_name)
+            return True
+        if attempt < 3:
+            await asyncio.sleep(2)
+
+    logger.warning(
+        "[TIMELAPSE] Could not delete %s from printer %s (it stays on the card; the archive copy is unaffected)",
+        remote_path,
+        printer_name,
+    )
+    return False
 
 
 async def get_storage_info_async(

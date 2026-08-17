@@ -1,4 +1,4 @@
-import { useMemo, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { useQuery, useQueryClient } from '@tanstack/react-query';
 import { Circle, Check, AlertTriangle, RefreshCw, ChevronDown, ChevronUp, Palette } from 'lucide-react';
@@ -7,7 +7,8 @@ import { useFilamentMapping } from '../../hooks/useFilamentMapping';
 import { getGlobalTrayId, effectivePreferLowest } from '../../utils/amsHelpers';
 import { getColorName } from '../../utils/colors';
 import { useFilamentLabels } from './useFilamentLabels';
-import type { FilamentMappingProps } from './types';
+import { autoAssignRackPositions, rackOptionsForGroup } from '../../utils/nozzleRack';
+import type { FilamentMappingProps, RackGroupInfo } from './types';
 
 /**
  * Filament mapping UI for comparing required filaments with loaded AMS slots.
@@ -18,17 +19,73 @@ export function FilamentMapping({
   filamentReqs,
   manualMappings,
   onManualMappingChange,
+  onEstimatedCostChange,
+  budgetAvailable,
+  quantity = 1,
   currencySymbol,
   defaultCostPerKg,
   defaultExpanded = false,
   forceColorMatch,
   onForceColorMatchChange,
   plateLabel,
+  archiveAmsMapping,
+  nozzleRackChoice,
+  onNozzleRackChoiceChange,
 }: FilamentMappingProps & { defaultExpanded?: boolean }) {
   const { t } = useTranslation();
   const queryClient = useQueryClient();
   const [isRefreshing, setIsRefreshing] = useState(false);
   const [isExpanded, setIsExpanded] = useState(defaultExpanded);
+  // "Mapping" toggle (only shown when the archive has a saved slicer pick):
+  // ON selects every slot straight from `archiveAmsMapping`, bypassing the
+  // type/color auto-match entirely — same mechanism as a manual per-slot
+  // pick (`manualMappings`), just applied to every required slot at once.
+  // OFF removes exactly those overrides so the panel falls back to its
+  // normal auto-match, without touching any *other* manual picks the user
+  // made by hand.
+  const [usingArchiveMapping, setUsingArchiveMapping] = useState(false);
+  // Which slot IDs the ON branch below actually wrote into manualMappings —
+  // so OFF can undo exactly those and leave any *other* manual pick the user
+  // made by hand (before or after pressing the button) untouched.
+  const appliedSlotIdsRef = useRef<number[]>([]);
+
+  // Reset the toggle whenever the saved mapping it would apply changes — a
+  // different printer, plate selection, or archive entirely. Without this
+  // the button can read ON (green) from a previous printer/archive/plate
+  // even though it was never pressed against the mapping currently in scope.
+  useEffect(() => {
+    setUsingArchiveMapping(false);
+    appliedSlotIdsRef.current = [];
+  }, [archiveAmsMapping, plateLabel, printerId]);
+
+  const toggleArchiveMapping = () => {
+    if (!archiveAmsMapping || !filamentReqs?.filaments) return;
+    if (usingArchiveMapping) {
+      const next = { ...manualMappings };
+      for (const slotId of appliedSlotIdsRef.current) {
+        delete next[slotId];
+      }
+      onManualMappingChange(next);
+      appliedSlotIdsRef.current = [];
+      setUsingArchiveMapping(false);
+      return;
+    }
+    const next = { ...manualMappings };
+    const appliedSlotIds: number[] = [];
+    for (const req of filamentReqs.filaments) {
+      const idx = req.slot_id - 1;
+      // A negative value (e.g. the external spool sentinel) means the
+      // slicer didn't resolve this filament to an AMS tray — leave that
+      // slot's existing auto-match/manual pick alone rather than clearing it.
+      if (req.slot_id > 0 && idx >= 0 && idx < archiveAmsMapping.length && archiveAmsMapping[idx] >= 0) {
+        next[req.slot_id] = archiveAmsMapping[idx];
+        appliedSlotIds.push(req.slot_id);
+      }
+    }
+    onManualMappingChange(next);
+    appliedSlotIdsRef.current = appliedSlotIds;
+    setUsingArchiveMapping(true);
+  };
 
   // Fetch printer status
   const { data: printerStatus } = useQuery({
@@ -119,12 +176,61 @@ export function FilamentMapping({
     return total;
   }, [filamentComparison, trayCostMap, defaultCostPerKg]);
 
+  // Callers rendering one mapping per selected plate naturally create a
+  // plate-scoped callback inline. Keep the latest callback in a ref so a new
+  // function identity does not retrigger the cost effect and create a
+  // parent/child render loop.
+  const onEstimatedCostChangeRef = useRef(onEstimatedCostChange);
+  useEffect(() => {
+    onEstimatedCostChangeRef.current = onEstimatedCostChange;
+  }, [onEstimatedCostChange]);
+  useEffect(() => {
+    onEstimatedCostChangeRef.current?.(totalCost > 0 ? totalCost : null);
+  }, [totalCost]);
+
   const hasAnyCost = useMemo(
     () => Array.from(trayCostMap.values()).some((v) => v != null && v > 0),
     [trayCostMap]
   );
+  const budgetCheckCost = totalCost * Math.max(1, quantity);
+  const isBudgetInsufficient = budgetAvailable != null && budgetCheckCost > budgetAvailable;
   const hasFilamentReqs = filamentReqs?.filaments && filamentReqs.filaments.length > 0;
   const isDualNozzle = filamentReqs?.filaments?.some((f) => f.nozzle_id != null) ?? false;
+
+  // Nozzle rack (#1784). The 3MF names a filament *group* per slot and says
+  // which groups need a hotend off the rack; which of the six positions each
+  // takes is the operator's to choose and is stated nowhere in the file. A
+  // group, not a slot, is the unit of choice — two slots sharing a group share
+  // one hotend and cannot point at different positions.
+  const rackGroups = useMemo(() => {
+    const groups = new Map<number, RackGroupInfo>();
+    for (const f of filamentReqs?.filaments ?? []) {
+      if (f.group_id != null && f.group) groups.set(f.group_id, f.group);
+    }
+    return groups;
+  }, [filamentReqs]);
+  const hasRack = (printerStatus?.nozzle_rack?.some((n) => n.id >= 16) ?? false)
+    && [...rackGroups.values()].some((g) => g.on_rack);
+
+  // What the dispatcher would assign if nothing were picked, shown as the
+  // pre-selection so the dialog states what will happen rather than leaving
+  // every picker blank. Explicit picks are pinned and the rest fill in around
+  // them, exactly as the backend does it.
+  const effectiveRackChoice = useMemo(() => {
+    if (!hasRack) return {};
+    return (
+      autoAssignRackPositions(printerStatus?.nozzle_rack, rackGroups, nozzleRackChoice ?? {})
+      ?? (nozzleRackChoice ?? {})
+    );
+  }, [hasRack, printerStatus?.nozzle_rack, rackGroups, nozzleRackChoice]);
+
+  const pickRackPosition = (groupId: number, position: number) => {
+    if (!onNozzleRackChoiceChange) return;
+    // Every group is written back, not just the edited one: leaving the others
+    // implicit would let the dispatcher re-assign them around the new pick and
+    // silently move a hotend the operator had already seen and accepted.
+    onNozzleRackChoiceChange({ ...effectiveRackChoice, [groupId]: position });
+  };
 
   // Filament Track Switch: when installed, AMS-to-extruder mapping is dynamic
   // (any slot can be routed to either extruder), so the per-nozzle dropdown
@@ -211,16 +317,33 @@ export function FilamentMapping({
       {isExpanded && (
         <div className="mt-2 bg-bambu-dark rounded-lg p-3 space-y-2">
           <div className="flex items-center justify-between mb-2">
-            <span className="text-xs text-bambu-gray">Click to change slot assignment</span>
-            <button
-              type="button"
-              onClick={handleRefresh}
-              className="flex items-center gap-1 px-2 py-0.5 text-xs rounded border border-bambu-gray/30 hover:border-bambu-gray hover:bg-bambu-dark-tertiary transition-colors text-bambu-gray hover:text-white"
-              disabled={isRefreshing}
-            >
-              <RefreshCw className={`w-3 h-3 ${isRefreshing ? 'animate-spin' : ''}`} />
-              <span>Re-read</span>
-            </button>
+            <span className="text-xs text-bambu-gray">{t('printModal.clickToChangeSlot')}</span>
+            <div className="flex items-center gap-1.5">
+              {archiveAmsMapping && (
+                <button
+                  type="button"
+                  onClick={toggleArchiveMapping}
+                  title={t('printModal.useArchiveMappingTooltip')}
+                  className={`flex items-center gap-1 px-2 py-0.5 text-xs rounded border transition-colors ${
+                    usingArchiveMapping
+                      ? 'border-bambu-green bg-bambu-green/10 text-bambu-green'
+                      : 'border-bambu-gray/30 hover:border-bambu-gray hover:bg-bambu-dark-tertiary text-bambu-gray hover:text-white'
+                  }`}
+                >
+                  <Check className="w-3 h-3" />
+                  <span>{t('printModal.useArchiveMapping')}</span>
+                </button>
+              )}
+              <button
+                type="button"
+                onClick={handleRefresh}
+                className="flex items-center gap-1 px-2 py-0.5 text-xs rounded border border-bambu-gray/30 hover:border-bambu-gray hover:bg-bambu-dark-tertiary transition-colors text-bambu-gray hover:text-white"
+                disabled={isRefreshing}
+              >
+                <RefreshCw className={`w-3 h-3 ${isRefreshing ? 'animate-spin' : ''}`} />
+                <span>{t('printModal.reRead')}</span>
+              </button>
+            </div>
           </div>
           {filamentComparison.map((item, idx) => {
             // #1717: surface the same per-slot force-color-match checkbox here
@@ -237,7 +360,17 @@ export function FilamentMapping({
             <div key={idx} className="space-y-1">
               <div
                 className="grid items-center gap-2 text-xs"
-                style={{ gridTemplateColumns: '16px minmax(70px, 1fr) auto 2fr 16px' }}
+                style={{
+                  // The rack picker sits inside the required-filament cell, so
+                  // on a rack machine that cell has to carry the name *and* an
+                  // ~85px dropdown. Raising only the floor (not the fraction)
+                  // keeps every other printer's layout exactly as it was, and
+                  // keeps the AMS dropdown — which names type, colour and
+                  // remaining weight — the widest column.
+                  gridTemplateColumns: hasRack
+                    ? '16px minmax(210px, 1.4fr) auto 2fr 16px'
+                    : '16px minmax(70px, 1fr) auto 2fr 16px',
+                }}
               >
                 {/* Required color */}
                 <span title={`Required: ${resolvedName} - ${colorLabel}`}>
@@ -247,14 +380,44 @@ export function FilamentMapping({
                     truncates; the gram usage is pinned (shrink-0) so it never
                     clips on narrow/mobile widths (#2669). */}
                 <span className="text-white flex items-center gap-1 min-w-0">
-                  {isDualNozzle && item.nozzle_id != null && (
+                  {hasRack && item.group_id != null && item.group ? (
+                    item.group.on_rack ? (
+                      <select
+                        value={effectiveRackChoice[item.group_id] ?? ''}
+                        onChange={(e) => pickRackPosition(item.group_id!, Number(e.target.value))}
+                        disabled={!onNozzleRackChoiceChange}
+                        title={t('printModal.rackPositionTooltip')}
+                        aria-label={t('printModal.rackPosition')}
+                        className="shrink-0 bg-bambu-dark-tertiary text-white text-[10px] font-bold rounded px-1 py-0.5 border border-bambu-dark-tertiary focus:border-bambu-green outline-none disabled:opacity-60"
+                      >
+                        {rackOptionsForGroup(printerStatus?.nozzle_rack, item.group, t).map((option) => (
+                          <option
+                            key={option.position}
+                            value={option.position}
+                            disabled={!option.eligible}
+                            title={option.reason}
+                          >
+                            R{option.position}
+                            {option.diameter ? ` · ${option.diameter}` : ''}
+                          </option>
+                        ))}
+                      </select>
+                    ) : (
+                      <span
+                        className="inline-flex items-center justify-center w-3.5 h-3.5 rounded text-[9px] font-bold leading-none bg-bambu-gray/20 text-bambu-gray shrink-0"
+                        title={t('printModal.leftNozzleTooltip')}
+                      >
+                        {t('printModal.leftNozzle')}
+                      </span>
+                    )
+                  ) : isDualNozzle && item.nozzle_id != null ? (
                     <span
                       className="inline-flex items-center justify-center w-3.5 h-3.5 rounded text-[9px] font-bold leading-none bg-bambu-gray/20 text-bambu-gray shrink-0"
                       title={item.nozzle_id === 1 ? t('printModal.leftNozzleTooltip') : t('printModal.rightNozzleTooltip')}
                     >
                       {item.nozzle_id === 1 ? t('printModal.leftNozzle') : t('printModal.rightNozzle')}
                     </span>
-                  )}
+                  ) : null}
                   <span className="truncate min-w-0" title={resolvedName}>{resolvedName}</span>
                   <span className="text-bambu-gray shrink-0 whitespace-nowrap">({item.used_grams}g)</span>
                 </span>
@@ -348,7 +511,19 @@ export function FilamentMapping({
             <span className="text-white">
               {totalCost > 0 || hasAnyCost ? `${currencySymbol}${totalCost.toFixed(2)}` : 'N/A'}
             </span>
+            {quantity > 1 && totalCost > 0 && (
+              <span className="ml-2">
+                {t('printModal.totalCostForQuantity', 'total: {{cost}}', {
+                  cost: `${currencySymbol}${budgetCheckCost.toFixed(2)}`,
+                })}
+              </span>
+            )}
           </div>
+          {isBudgetInsufficient && (
+            <p className="text-xs text-red-400 mt-2">
+              {t('printModal.insufficientBudget', 'Insufficient budget for this cost center.')}
+            </p>
+          )}
           {hasTypeMismatch && (
             <p className="text-xs text-orange-700 dark:text-orange-400 mt-2">Required filament type not found in printer.</p>
           )}

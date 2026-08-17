@@ -1,10 +1,18 @@
 from datetime import datetime
+from typing import Annotated
 
-from pydantic import BaseModel, model_validator
+from pydantic import BaseModel, BeforeValidator, model_validator
+
+from backend.app.utils.filename import clean_display_name
+
+# Free text, punctuation and all -- only control characters are taken out, and
+# only on the way in (#2832). Anything that turns a name into a path sanitises
+# it there instead, where the budget and the fallback are known.
+DisplayName = Annotated[str | None, BeforeValidator(clean_display_name)]
 
 
 class ArchiveBase(BaseModel):
-    print_name: str | None = None
+    print_name: DisplayName = None
     is_favorite: bool | None = None
     tags: str | None = None
     notes: str | None = None
@@ -137,6 +145,8 @@ class ArchiveSlim(BaseModel):
     started_at: datetime | None
     completed_at: datetime | None
     cost: float | None
+    energy_kwh: float | None = None
+    energy_cost: float | None = None
     quantity: int = 1
     created_at: datetime | None
 

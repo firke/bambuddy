@@ -238,6 +238,86 @@ def drying_screen_only(model: str | None) -> bool:
     return model.strip().upper() in _DRYING_SCREEN_ONLY_MODELS
 
 
+# Temperature keys the UI actually draws. `state.temperatures` is also working
+# memory: it carries private bookkeeping (`_nozzle_target_set_time`) and derived
+# flags (`nozzle_heating`) that no consumer outside this module should see. The
+# full-status path hands out the whole dict to logged-in callers; the streaming
+# overlay gets only this list, because an overlay token is a narrower grant than
+# a login and should not pick up fields by accident as the dict grows.
+DISPLAY_TEMPERATURE_KEYS = (
+    "nozzle",
+    "nozzle_target",
+    "nozzle_2",
+    "nozzle_2_target",
+    "bed",
+    "bed_target",
+    "chamber",
+    "chamber_target",
+)
+
+
+def display_temperatures(temperatures: dict | None, model: str | None) -> dict[str, float]:
+    """Filter `state.temperatures` down to the readings a viewer is shown.
+
+    Drops chamber readings on models without a real chamber sensor — P1P, P1S,
+    A1 and A1 mini all report a meaningless `chamber_temper` — matching what
+    ``printer_state_to_dict`` already does for the full status payload.
+    """
+    if not temperatures:
+        return {}
+    allow_chamber = supports_chamber_temp(model)
+    out: dict[str, float] = {}
+    for key in DISPLAY_TEMPERATURE_KEYS:
+        if key.startswith("chamber") and not allow_chamber:
+            continue
+        value = temperatures.get(key)
+        if value is None:
+            continue
+        try:
+            out[key] = float(value)
+        except (TypeError, ValueError):
+            continue
+    return out
+
+
+def uniform_tray_filament_hint(loaded_types: list[str]) -> str | None:
+    """Guess an active cycle's filament from the loaded trays.
+
+    Bambu never echoes back which filament or temperature a drying cycle is
+    running, so the badge normally reads the target we cached when we sent the
+    command. This is the fallback for when we have no record — drying started in
+    a previous backend lifetime, or from the printer's own screen.
+
+    It answers only when every loaded tray holds the same filament type. On a
+    mixed unit the first tray is evidence of nothing: an AMS holding two PETG
+    and two PLA spools, drying PLA at the 45°C the user picked, was labelled
+    "PETG @ 65°C" purely because slot 1 happened to be PETG (#2759).
+
+    Deliberately no temperature. The RFID-recommended ``drying_temp`` used to be
+    returned alongside a uniform filament, which narrowed #2759 to units whose
+    spools disagree but left the uniform case stating a temperature just as
+    invented: a unit loaded entirely with PLA, drying at the 45°C the user
+    picked, read "PLA @ 55°C" the moment the cached target went missing. The
+    filament type is real evidence — every spool in the unit agrees on it, and
+    the dryer heats all of them — but the temperature is a free choice in the
+    popover, so a recommendation is never evidence of what is running. The badge
+    shows the filament and the countdown, and names a temperature only when we
+    actually sent it.
+
+    Args:
+        loaded_types: ``tray_type`` for each tray, in slot order. Empty slots
+            (falsy) are ignored.
+
+    Returns:
+        The shared filament type, or None if the loaded trays disagree or the
+        unit is empty.
+    """
+    types = {str(tray_type) for tray_type in loaded_types if tray_type}
+    if len(types) != 1:
+        return None
+    return next(iter(types))
+
+
 def supports_drying(model: str | None, firmware: str | None) -> bool:
     """Check if a printer model accepts remote AMS drying commands.
 
@@ -325,9 +405,11 @@ class PrinterManager:
         self._on_status_change: Callable[[int, PrinterState], None] | None = None
         self._on_ams_change: Callable[[int, list], None] | None = None
         self._on_layer_change: Callable[[int, int], None] | None = None
+        self._on_print_progress: Callable[[int, int], None] | None = None
         self._on_bed_temp_update: Callable[[int, float], None] | None = None
         self._on_drying_complete: Callable[[int, int], None] | None = None
         self._on_assignment_verified: Callable[[int, int, int, bool, dict], None] | None = None
+        self._on_tray_change: Callable[[int, int, int], None] | None = None
         self._loop: asyncio.AbstractEventLoop | None = None
         # Track who started the current print (Issue #206)
         self._current_print_user: dict[int, dict] = {}  # {printer_id: {"user_id": int, "username": str}}
@@ -377,6 +459,13 @@ class PrinterManager:
         UI without it. Centralised here so every current AND future caller is
         covered without each one having to remember to broadcast.
         """
+        # Callers re-assert the current value routinely (the queue clears the gate
+        # on every dispatch, whether or not it was up), so the outward-facing
+        # emissions below are edge-triggered — an MQTT subscriber or a phone
+        # notification must not see a "plate cleared" for a plate that was never
+        # dirty. Persistence and the WebSocket broadcast stay unconditional: they
+        # are idempotent and predate this (#961/#1128).
+        changed = awaiting != (printer_id in self._awaiting_plate_clear)
         if awaiting:
             self._awaiting_plate_clear.add(printer_id)
         else:
@@ -386,6 +475,45 @@ class PrinterManager:
         if self._loop and self._loop.is_running():
             self._schedule_async(self._persist_awaiting_plate_clear(printer_id, awaiting))
             self._schedule_async(self._broadcast_status_change(printer_id))
+            if changed:
+                self._schedule_async(self._emit_plate_clear_change(printer_id, awaiting))
+
+    async def _emit_plate_clear_change(self, printer_id: int, awaiting: bool) -> None:
+        """Relay a plate-clear gate transition to MQTT and notifications (#2525).
+
+        The flag is Bambuddy-side, so nothing about it reaches an external
+        automation on its own — the printer's own MQTT push knows only
+        RUNNING/PAUSE/FAILED/FINISH/IDLE. Emitted from here rather than from the
+        three call sites so every current and future caller is covered, the same
+        reasoning as the WebSocket broadcast above.
+
+        Imports are local: ``mqtt_relay`` and ``notification_service`` both sit
+        above this module in the dependency order.
+        """
+        printer = self.get_printer(printer_id)
+        if not printer:
+            return
+
+        try:
+            from backend.app.services.mqtt_relay import mqtt_relay
+
+            await mqtt_relay.on_plate_clear_state(printer_id, printer.name, printer.serial_number, awaiting)
+        except Exception as e:
+            logger.warning("Failed to publish plate-clear state for printer %d: %s", printer_id, e)
+
+        # Only the rising edge is worth a notification — "the bed is now free"
+        # is not an action item, and the queue clears the gate by itself.
+        if not awaiting:
+            return
+
+        try:
+            from backend.app.core.database import async_session
+            from backend.app.services.notification_service import notification_service
+
+            async with async_session() as db:
+                await notification_service.on_plate_clear_required(printer_id, printer.name, db)
+        except Exception as e:
+            logger.warning("Failed to send plate-clear notification for printer %d: %s", printer_id, e)
 
     async def _broadcast_status_change(self, printer_id: int) -> None:
         """Emit a ``printer_status`` WebSocket update for this printer (#1128).
@@ -502,6 +630,15 @@ class PrinterManager:
         """Set callback for layer change events. Receives (printer_id, layer_num)."""
         self._on_layer_change = callback
 
+    def set_print_progress_callback(self, callback: Callable[[int, int], None]):
+        """Set callback for print-progress advances (#2547).
+
+        Receives (printer_id, percent) each time `mc_percent` increases during a
+        running print — including the final layer, where layer-change events
+        have already stopped.
+        """
+        self._on_print_progress = callback
+
     def set_bed_temp_update_callback(self, callback: Callable[[int, float], None]):
         """Set callback for bed temperature updates. Receives (printer_id, bed_temp)."""
         self._on_bed_temp_update = callback
@@ -522,6 +659,15 @@ class PrinterManager:
         filament id or when the verification window elapses without it.
         """
         self._on_assignment_verified = callback
+
+    def set_tray_change_callback(self, callback: Callable[[int, int, int], None]):
+        """Set callback for mid-print tray changes.
+
+        Receives ``(printer_id, global_tray_id, layer_num)`` for every entry
+        appended to the printer's tray-change log, so it can be persisted for
+        the completion-time weight split.
+        """
+        self._on_tray_change = callback
 
     def _schedule_async(self, coro):
         """Schedule an async coroutine from a sync context.
@@ -578,6 +724,10 @@ class PrinterManager:
             if self._on_layer_change:
                 self._schedule_async(self._on_layer_change(printer_id, layer_num))
 
+        def on_print_progress(percent: int):
+            if self._on_print_progress:
+                self._schedule_async(self._on_print_progress(printer_id, percent))
+
         def on_bed_temp_update(bed_temp: float):
             if self._on_bed_temp_update:
                 self._schedule_async(self._on_bed_temp_update(printer_id, bed_temp))
@@ -590,6 +740,10 @@ class PrinterManager:
             if self._on_assignment_verified:
                 self._schedule_async(self._on_assignment_verified(printer_id, ams_id, tray_id, verified, detail))
 
+        def on_tray_change(tray_global: int, layer_num: int):
+            if self._on_tray_change:
+                self._schedule_async(self._on_tray_change(printer_id, tray_global, layer_num))
+
         client = BambuMQTTClient(
             ip_address=printer.ip_address,
             serial_number=printer.serial_number,
@@ -600,11 +754,13 @@ class PrinterManager:
             on_print_complete=on_print_complete,
             on_ams_change=on_ams_change,
             on_layer_change=on_layer_change,
+            on_print_progress=on_print_progress,
             on_bed_temp_update=on_bed_temp_update,
             on_drying_complete=on_drying_complete,
             on_print_running_observed=on_print_running_observed,
             on_finish_photo_moment=on_finish_photo_moment,
             on_assignment_verified=on_assignment_verified,
+            on_tray_change=on_tray_change,
         )
 
         client.connect()
@@ -730,6 +886,7 @@ class PrinterManager:
         use_ams: bool = True,
         nozzle_offset_cali: str = "auto",
         nozzle_mapping: str | None = None,
+        nozzle_slot_extruders: str | None = None,
     ) -> bool:
         """Start a print on a connected printer.
 
@@ -737,6 +894,10 @@ class PrinterManager:
         project_file MQTT command (H2C rack-swap slicer pick preservation,
         #1780). It rides through to the MQTT client untouched; the dispatch
         builder there parses + injects it only on dual-nozzle models.
+
+        ``nozzle_slot_extruders`` is the fallback for a job that never passed
+        through BambuStudio (#2800): per-slot extruder indices the MQTT layer
+        resolves into physical rack positions, and only on rack models.
         """
         caller = traceback.extract_stack(limit=3)[0]
         logger.info(
@@ -760,6 +921,7 @@ class PrinterManager:
                 use_ams=use_ams,
                 nozzle_offset_cali=nozzle_offset_cali,
                 nozzle_mapping=nozzle_mapping,
+                nozzle_slot_extruders=nozzle_slot_extruders,
             )
         return False
 
@@ -905,6 +1067,11 @@ class PrinterManager:
                 "success": client.state.connected,
                 "state": client.state.state if client.state.connected else None,
                 "model": client.state.raw_data.get("device_model"),
+                # Why the probe failed, when the printer told us: one of the
+                # CONNECT_ERROR_* slugs, else None. Lets the add-printer flow
+                # and the connection diagnostic say "the printer rejected the
+                # access code" instead of an unqualified failure (#2698).
+                "reason": None if client.state.connected else client.last_connect_error,
             }
         finally:
             # Off-loop teardown — see docstring. paho's loop_stop() joins the
@@ -1188,9 +1355,9 @@ def printer_state_to_dict(
             # per-tick AMS push, so prefer the cached target from the last
             # ``send_drying_command``. When we have no record (drying
             # started in a previous backend lifetime, or the cache was
-            # never seeded), fall back to the first loaded tray's
-            # tray_type + RFID-recommended drying_temp — the same heuristic
-            # the popover already uses to seed defaults.
+            # never seeded), the loaded trays can still name the filament
+            # if they agree — but never the temperature, which only the
+            # cache knows. See uniform_tray_filament_hint.
             ams_id_int = int(ams_data.get("id", 0))
             target = (drying_targets or {}).get(ams_id_int)
             dry_target_temp: int | None = None
@@ -1205,17 +1372,8 @@ def printer_state_to_dict(
                         dry_target_temp = None
                 if fil_val:
                     dry_filament = str(fil_val)
-            if dry_target_temp is None or not dry_filament:
-                for tray in trays:
-                    if tray.get("tray_type"):
-                        if not dry_filament:
-                            dry_filament = str(tray["tray_type"])
-                        if dry_target_temp is None and tray.get("drying_temp"):
-                            try:
-                                dry_target_temp = int(tray["drying_temp"])
-                            except (TypeError, ValueError):
-                                pass
-                        break
+            if not dry_filament:
+                dry_filament = uniform_tray_filament_hint([tray.get("tray_type") or "" for tray in trays])
 
             ams_units.append(
                 {
@@ -1367,6 +1525,8 @@ def printer_state_to_dict(
         "big_fan1_speed": state.big_fan1_speed,
         "big_fan2_speed": state.big_fan2_speed,
         "heatbreak_fan_speed": state.heatbreak_fan_speed,
+        "left_aux_fan_speed": state.left_aux_fan_speed,
+        "exhaust_fan_present": state.exhaust_fan_present,
         # Chamber light state
         "chamber_light": state.chamber_light,
         # Active extruder for dual-nozzle printers (0=right, 1=left)

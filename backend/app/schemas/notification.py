@@ -19,6 +19,7 @@ class ProviderType(StrEnum):
     DISCORD = "discord"
     WEBHOOK = "webhook"
     HOMEASSISTANT = "homeassistant"
+    BARK = "bark"
 
 
 class NotificationProviderBase(BaseModel):
@@ -43,6 +44,7 @@ class NotificationProviderBase(BaseModel):
         default=True,
         description="Notify when a print is paused because a required tray has no assigned spool",
     )
+    on_billing_charge_failed: bool = Field(default=True, description="Notify when a print charge cannot be recorded")
 
     # Event triggers - printer status
     on_printer_offline: bool = Field(default=False, description="Notify when printer goes offline")
@@ -57,6 +59,9 @@ class NotificationProviderBase(BaseModel):
     # Event triggers - AMS environmental alarms (regular AMS)
     on_ams_humidity_high: bool = Field(default=False, description="Notify when AMS humidity exceeds threshold")
     on_ams_temperature_high: bool = Field(default=False, description="Notify when AMS temperature exceeds threshold")
+    on_ams_drying_suspended: bool = Field(
+        default=True, description="Notify when automatic drying gives up on an AMS unit"
+    )
 
     # Event triggers - AMS-HT environmental alarms
     on_ams_ht_humidity_high: bool = Field(default=False, description="Notify when AMS-HT humidity exceeds threshold")
@@ -64,8 +69,16 @@ class NotificationProviderBase(BaseModel):
         default=False, description="Notify when AMS-HT temperature exceeds threshold"
     )
 
+    # Event triggers - Home Assistant sensors (#1148)
+    on_ha_sensor_alert: bool = Field(
+        default=False, description="Notify when a bound Home Assistant sensor enters its alert state"
+    )
+
     # Event triggers - Build plate detection
     on_plate_not_empty: bool = Field(default=True, description="Notify when objects detected on plate before print")
+    on_plate_clear_required: bool = Field(
+        default=False, description="Notify when a finished print is waiting for plate-clear confirmation"
+    )
 
     # Event triggers - Bed cooled
     on_bed_cooled: bool = Field(default=False, description="Notify when bed cools after print")
@@ -133,6 +146,7 @@ class NotificationProviderUpdate(BaseModel):
     on_print_progress: bool | None = None
     on_print_missing_spool_assignment: bool | None = None
     on_print_paused_unassigned_spool: bool | None = None
+    on_billing_charge_failed: bool | None = None
 
     # Event triggers - printer status
     on_printer_offline: bool | None = None
@@ -144,13 +158,18 @@ class NotificationProviderUpdate(BaseModel):
     # Event triggers - AMS environmental alarms (regular AMS)
     on_ams_humidity_high: bool | None = None
     on_ams_temperature_high: bool | None = None
+    on_ams_drying_suspended: bool | None = None
 
     # Event triggers - AMS-HT environmental alarms
     on_ams_ht_humidity_high: bool | None = None
     on_ams_ht_temperature_high: bool | None = None
 
+    # Event triggers - Home Assistant sensors (#1148)
+    on_ha_sensor_alert: bool | None = None
+
     # Event triggers - Build plate detection
     on_plate_not_empty: bool | None = None
+    on_plate_clear_required: bool | None = None
 
     # Event triggers - Bed cooled
     on_bed_cooled: bool | None = None

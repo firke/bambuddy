@@ -203,15 +203,12 @@ jobs:
           vulns = data.get('vulnerabilities', {})
           # Documented advisory exceptions: high/critical findings whose only offered
           # 'fix' is a semver-major change and which do not apply to how Bambuddy ships.
-          # Keyed by GHSA id; RE-REVIEW ON EVERY react-router BUMP.
-          #   GHSA-qwww-vcr4-c8h2 - React Router RSC-mode CSRF. Bambuddy is a Vite SPA
-          #   using BrowserRouter with no RSC runtime (@react-router/server is NOT
-          #   installed), so the vulnerable code path is unreachable. No non-major fix
-          #   exists (7.18.1 is the most-patched 7.x - it clears 14 other advisories that
-          #   older 7.x carry - and the RSC fix landed only in the 8.3.0 major). react-router
-          #   /-dom are pinned to 7.18.1 in package.json. If a non-major fix ships, this stops
-          #   being exempt (major-only guard below) and the gate fails until we take it.
-          ALLOWLIST = {'GHSA-qwww-vcr4-c8h2'}
+          # Keyed by GHSA id. An entry only holds while the fix stays major-only (see
+          # fix_is_major below) - once upstream backports, the gate fails until we take
+          # the patch. That is what retired the one entry this list used to carry:
+          # GHSA-qwww-vcr4-c8h2 (React Router RSC-mode CSRF) shipped in 7.18.2, so the
+          # pin moved rather than the exception staying.
+          ALLOWLIST = set()
           def advisory_ids(name, seen=None):
               seen = seen if seen is not None else set()
               if name in seen:

@@ -1,6 +1,6 @@
 import { useState, useEffect, useCallback, useRef, useMemo } from 'react';
 import { NavLink, Outlet, useNavigate, useLocation } from 'react-router-dom';
-import { Printer, Archive, ListOrdered, BarChart3, Cloud, Settings, Sun, Moon, Monitor, ChevronLeft, ChevronRight, Keyboard, Github, ArrowUpCircle, Wrench, FolderKanban, FolderOpen, X, Menu, Info, Plug, Bug, LogOut, Key, Loader2, Disc3, ShieldAlert, Globe, Bell, type LucideIcon } from 'lucide-react';
+import { Printer, Archive, ListOrdered, BarChart3, Cloud, Settings, Sun, Moon, Monitor, ChevronLeft, ChevronRight, Keyboard, Github, ArrowUpCircle, Wrench, FolderKanban, FolderOpen, X, Menu, Info, Plug, Bug, LogOut, Key, Loader2, Disc3, ShieldAlert, Globe, Bell, Receipt, type LucideIcon } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 import { useTheme } from '../contexts/ThemeContext';
 import { KeyboardShortcutsModal } from './KeyboardShortcutsModal';
@@ -48,6 +48,9 @@ export const defaultNavItems: NavItem[] = [
   { id: 'profiles', to: '/profiles', icon: Cloud, labelKey: 'nav.profiles' },
   { id: 'maintenance', to: '/maintenance', icon: Wrench, labelKey: 'nav.maintenance' },
   { id: 'stats', to: '/stats', icon: BarChart3, labelKey: 'nav.stats' },
+  // Opt-in feature: gated in isHidden() on the billing_enabled setting, so the
+  // entry stays out of the sidebar entirely until an admin turns billing on.
+  { id: 'finance', to: '/finance', icon: Receipt, labelKey: 'nav.finance' },
   // User-account feature: gated in isHidden() on advanced auth + user_notifications
   // + the notifications:user_email permission. Kept adjacent to Settings
   // intentionally. Do not drop this entry — without it the /notifications page
@@ -72,6 +75,17 @@ export function Layout() {
   const { mode, resolvedMode, toggleMode } = useTheme();
   const { t } = useTranslation();
   const isSidebarCompact = useIsSidebarCompact();
+
+  // Bug-report panel state lives here because the trigger moves (#2750,
+  // reporter @goodjaltman). Below the sidebar-compact breakpoint the floating
+  // disc is replaced by a button in the compact header: the bottom-right corner
+  // is the most contended region in the app — the Profiles scroll-to-top FAB,
+  // the floating camera window and its resize handle, the Group Edit save bar,
+  // the bulk-selection toolbars, and the File Manager / Archives per-card
+  // action buttons all live there — and a fixed 48px disc sits on top of
+  // whichever of them happens to be underneath. Moving out of the corner is
+  // the only fix that covers in-flow content as well as fixed overlays.
+  const [bugReportOpen, setBugReportOpen] = useState(false);
 
   // Theme toggle: mode → icon and tooltip
   const ThemeIcon = { dark: Sun, light: Monitor, system: Moon }[mode];
@@ -298,6 +312,7 @@ export function Layout() {
       maintenance: 'maintenance:read',
       projects: 'projects:read',
       inventory: 'inventory:read',
+      finance: 'cost_centers:read_own',
       files: ['library:read', 'library:read_own', 'library:read_all'],
       makerworld: 'makerworld:view',
       settings: 'settings:read',
@@ -323,6 +338,11 @@ export function Layout() {
       }
       // notifications nav item also requires advanced auth to be enabled and user_notifications_enabled setting
       if (id === 'notifications' && (!authEnabled || !advancedAuthStatus?.advanced_auth_enabled || (settings?.user_notifications_enabled === false))) return true;
+      // Finance is off by default and the page is meaningless without it, so it
+      // stays hidden until billing is explicitly on. Tested for `true` rather
+      // than `!== false` on purpose: settings are undefined on the first render,
+      // and a nav entry that appears and then vanishes reads as a glitch.
+      if (id === 'finance' && settings?.billing_enabled !== true) return true;
       return false;
     };
 
@@ -494,6 +514,15 @@ export function Layout() {
             alt="Bambuddy"
             className="h-8 ml-3"
           />
+          {/* Bug report — the compact-layout home of the floating bubble. */}
+          <button
+            onClick={() => setBugReportOpen(true)}
+            className="ml-auto p-2 -mr-2 rounded-lg text-red-500 hover:bg-bambu-dark-tertiary transition-colors"
+            title={t('bugReport.title')}
+            aria-label={t('bugReport.title')}
+          >
+            <Bug className="w-5 h-5" />
+          </button>
         </header>
       )}
 
@@ -1108,7 +1137,16 @@ export function Layout() {
           </Card>
         </div>
       )}
-      <BugReportBubble />
+      {/* The panel always mounts here, at the Layout root. It must not move
+          into the header alongside its compact-layout trigger: the header is
+          `fixed z-40` and so its own stacking context, which would cap the
+          z-50 panel at the header's level and bury it under every ordinary
+          modal in the app. */}
+      <BugReportBubble
+        showTrigger={!isSidebarCompact}
+        open={bugReportOpen}
+        onOpenChange={setBugReportOpen}
+      />
     </div>
   );
 }

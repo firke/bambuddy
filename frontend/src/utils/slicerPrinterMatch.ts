@@ -13,9 +13,12 @@
 //      derived from the backend's canonical PRINTER_MODEL_MAP (fetched via
 //      /slicer/printer-models), not duplicated here.
 //
-// The result drives grouping, not hard hiding: a preset no rule covers
-// stays in the main list, and only a preset that resolves to a *different*
-// printer is pushed into an "Other printers" group.
+// Only a definite 'mismatch' is acted on: the dropdown holds those back
+// behind a "Show all" link. A preset no rule covers classifies as 'unknown'
+// and always stays in the list — absence of evidence is not evidence of
+// incompatibility, and hiding an untagged preset would make a user's own
+// imported profiles disappear. That asymmetry is why every parse failure
+// below returns 'unknown' rather than guessing a mismatch.
 
 export type PrinterCompatibility = 'match' | 'mismatch' | 'unknown';
 
@@ -100,6 +103,29 @@ function normalizeModelFragment(s: string): string {
   return s.replace(/\s+/g, '').toLowerCase();
 }
 
+/**
+ * Drop BambuStudio's ``"# "`` user-clone prefix.
+ *
+ * Editing a system preset saves a copy named ``"# Bambu Lab X1 Carbon 0.4
+ * nozzle"``, and `.bbscfg` bundle exports use the same convention. Two places
+ * need it off:
+ *
+ *   1. ``extractPrinterPresetModel`` — the prefix fails its "Bambu Lab …"
+ *      test, so a cloned *printer* made every preset classify as 'unknown'
+ *      and the dropdown filter silently did nothing.
+ *   2. The ``compatible_printers`` comparison, where a prefix on one side
+ *      alone reads as a mismatch against the very printer the preset was
+ *      cloned from — and a mismatch now hides the preset.
+ *
+ * The ``@`` tag extractors need no such handling: they scan for "@BBL " or
+ * the last "@", both of which skip a leading prefix already.
+ *
+ * The backend normalises the same prefix in ``_canonical_printer_model``.
+ */
+function stripUserClonePrefix(name: string): string {
+  return name.replace(/^#\s*/, '').trim();
+}
+
 // Bambu Studio's naming convention for bundled presets: the 0.4 nozzle is
 // the default and its variants drop the nozzle suffix; 0.2 / 0.6 / 0.8
 // carry an explicit "<size> nozzle" segment. So a process with no suffix
@@ -132,7 +158,7 @@ function extractBblToken(presetName: string): { token: string; nozzle: string | 
 // nozzle]" printer preset name. Returns null for non-Bambu printer
 // presets — there is no reliable name-based match against those.
 function extractPrinterPresetModel(printerPresetName: string): { model: string; nozzle: string | null } | null {
-  const m = printerPresetName.match(/^Bambu Lab\s+(.+)$/i);
+  const m = stripUserClonePrefix(printerPresetName).match(/^Bambu Lab\s+(.+)$/i);
   if (!m) return null;
   const { stripped, nozzle } = takeNozzleSuffix(m[1]);
   return stripped ? { model: stripped, nozzle } : null;
@@ -282,7 +308,12 @@ export function presetCompatibility(
   // authoritative when set.
   const compat = preset.compatible_printers;
   if (compat && compat.length > 0) {
-    return compat.includes(selectedPrinterName) ? 'match' : 'mismatch';
+    // Compared with the clone prefix off both sides: a preset cloned from a
+    // system printer lists the *unprefixed* name, and comparing that raw
+    // against a selected "# Bambu Lab …" reads as a mismatch — which now
+    // hides the preset rather than merely demoting it.
+    const selected = stripUserClonePrefix(selectedPrinterName);
+    return compat.some((name) => stripUserClonePrefix(name) === selected) ? 'match' : 'mismatch';
   }
   // (2) BambuStudio's `@BBL <model>` name convention — covers cloud /
   // standard presets that don't carry compatible_printers.

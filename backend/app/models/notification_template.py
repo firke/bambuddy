@@ -68,6 +68,12 @@ DEFAULT_TEMPLATES = [
         "body_template": "{printer}: print PAUSED - no spool assigned\nSlots: {missing_slots}\nExpected profile:\n{missing_slot_details}\n\nAssign the spool, then resume the print.",
     },
     {
+        "event_type": "billing_charge_failed",
+        "name": "Billing Charge Failed",
+        "title_template": "Billing Charge Failed",
+        "body_template": "{printer}: {filename}\nThe print charge could not be recorded. The budget reservation was retained.\nArchive: {archive_id}",
+    },
+    {
         "event_type": "printer_offline",
         "name": "Printer Offline",
         "title_template": "Printer Offline",
@@ -90,6 +96,12 @@ DEFAULT_TEMPLATES = [
         "name": "Plate Not Empty",
         "title_template": "Plate Not Empty - Print Paused",
         "body_template": "{printer}: Objects detected on build plate. Print has been paused. Clear plate and resume.",
+    },
+    {
+        "event_type": "plate_clear_required",
+        "name": "Plate Clear Required",
+        "title_template": "Plate Clear Required",
+        "body_template": "{printer}: print finished. Confirm the build plate is clear before the queue continues.",
     },
     {
         "event_type": "filament_low",
@@ -116,10 +128,26 @@ DEFAULT_TEMPLATES = [
         "body_template": "{printer} {ams_label}: Temperature {temperature}°C exceeds {threshold}°C threshold",
     },
     {
+        "event_type": "ams_drying_suspended",
+        "name": "Auto-Drying Suspended",
+        "title_template": "Auto-Drying Suspended",
+        "body_template": (
+            "{printer} {ams_label}: stopped automatic drying after {cycles} cycles left humidity at "
+            "{humidity}%, still above the {threshold}% threshold. An AMS reads higher while it is warm, "
+            "so raise the threshold or dry the spools off the printer."
+        ),
+    },
+    {
         "event_type": "bed_cooled",
         "name": "Bed Cooled",
         "title_template": "Bed Cooled",
         "body_template": "{printer}: Bed cooled to {bed_temp}°C (threshold: {threshold}°C)",
+    },
+    {
+        "event_type": "ha_sensor_alert",
+        "name": "Home Assistant Sensor Alert",
+        "title_template": "Sensor Alert",
+        "body_template": "{printer}: {sensor} is {state}",
     },
     {
         "event_type": "first_layer_complete",

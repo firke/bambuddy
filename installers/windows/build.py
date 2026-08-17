@@ -259,19 +259,6 @@ def stage_backend(frontend_dist: Path) -> None:
         ignore=shutil.ignore_patterns(".DS_Store", "._*"),
     )
 
-    # gcode_viewer/ is a vendored 3D-preview iframe served via explicit
-    # routes in main.py (looked up via static_dir.parent / "gcode_viewer").
-    # In the staged layout STAGING/app/static/'s sibling is STAGING/app/,
-    # so place the directory next to static/ to match runtime resolution.
-    gcode_viewer_src = REPO_ROOT / "gcode_viewer"
-    if gcode_viewer_src.exists():
-        log("staging gcode_viewer/")
-        shutil.copytree(
-            gcode_viewer_src,
-            app / "gcode_viewer",
-            ignore=shutil.ignore_patterns(".DS_Store", "._*"),
-        )
-
 
 def stage_nssm() -> None:
     target = STAGING / "bin"

@@ -24,7 +24,7 @@ import { LocationsModal } from '../components/LocationsModal';
 import { BulkEditSpoolsModal } from '../components/BulkEditSpoolsModal';
 import { useToast } from '../contexts/ToastContext';
 import { useAuth } from '../contexts/AuthContext';
-import { resolveSpoolColorName } from '../utils/colors';
+import { colorSortKey, resolveSpoolColorName } from '../utils/colors';
 import { getCurrencySymbol } from '../utils/currency';
 import { formatDateInput, parseUTCDate, type DateFormat } from '../utils/date';
 import { formatSlotLabel } from '../utils/amsHelpers';
@@ -412,6 +412,10 @@ const columnSortValues: Record<string, (spool: InventorySpool, assignmentMap: Re
   material: (s) => (s.material || '').toLowerCase(),
   subtype: (s) => (s.subtype || '').toLowerCase(),
   color_name: (s) => (s.color_name || '').toLowerCase(),
+  // Sorts the swatch column itself (#2729). Multi-colour spools sort on their
+  // primary colour — extra_colors are gradient stops, and a spool has to sit in
+  // exactly one place in the list.
+  rgba: (s) => colorSortKey(s.rgba),
   brand: (s) => (s.brand || '').toLowerCase(),
   slicer_filament: (s) => (s.slicer_filament_name || s.slicer_filament || '').toLowerCase(),
   location: (s, am) => {
@@ -1304,8 +1308,13 @@ function InventoryPage({ spoolmanMode = false, spoolmanModeReady = true }: { spo
 
   return (
     <div className="p-4 md:p-8 space-y-6">
-      {/* Header */}
-      <div className="flex items-center justify-between">
+      {/* Header. Stacks below sm and the actions wrap (#2813): five buttons
+          side by side are ~600px, and nothing in that row can shrink, so on a
+          phone the header pushed past the viewport and took the whole page
+          with it -- <main> is the scroll container, so everything inside it
+          panned sideways. Same pattern the Statistics, Settings and Archives
+          headers use, and the filter bar further down this page. */}
+      <div className="flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between">
         <div>
           <h1 className="text-2xl font-bold text-white flex items-center gap-3">
             <Package className="w-7 h-7 text-bambu-green" />
@@ -1313,7 +1322,7 @@ function InventoryPage({ spoolmanMode = false, spoolmanModeReady = true }: { spo
           </h1>
           <p className="text-bambu-gray mt-1">{t('inventory.subtitle')}</p>
         </div>
-        <div className="flex items-center gap-2">
+        <div className="flex flex-wrap items-center gap-2">
           {/* CSV import/export (#1576). Operates on Bambuddy's local inventory.
               In Spoolman mode the buttons stay visible (feature parity) but are
               disabled with a hint pointing at Spoolman's own CSV export, since

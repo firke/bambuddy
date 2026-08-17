@@ -18,6 +18,7 @@ from backend.app.core.tasks import spawn_background_task
 from backend.app.models.archive import PrintArchive
 from backend.app.models.filament import Filament
 from backend.app.models.printer import Printer
+from backend.app.utils.filename import clean_display_name
 from backend.app.utils.safe_path import PathTraversalError, safe_join_under
 
 logger = logging.getLogger(__name__)
@@ -1140,9 +1141,13 @@ class ArchiveService:
         created_by_id: int | None = None,
         original_filename: str | None = None,
         project_id: int | None = None,
+        cost_center_id: int | None = None,
         subtask_id: str | None = None,
         prefer_filename_for_name: bool = False,
         plate_id: int | None = None,
+        library_file_id: int | None = None,
+        slicer_ams_mapping: list[int] | None = None,
+        slicer_ams_mapping_printer_id: int | None = None,
     ) -> PrintArchive | None:
         """Archive a 3MF file with metadata.
 
@@ -1155,6 +1160,8 @@ class ArchiveService:
                 stored with UUID names)
             project_id: Project to associate this archive with (optional, set when triggered
                 from the project view)
+            library_file_id: Library file this run was dispatched from (optional,
+                set by the queue scheduler — powers per-file project progress, #1897)
             subtask_id: MQTT-provided task identifier (optional). Used to match an
                 existing archive across a backend restart mid-print so the
                 original row can be resumed instead of cancelled (#972).
@@ -1163,6 +1170,21 @@ class ArchiveService:
                 metadata. Used by virtual-printer flows so users who rename a job in
                 BambuStudio's "send to printer" dialog see that name instead of the
                 creator-baked title (#1152).
+            slicer_ams_mapping: The slicer's own live-resolved AMS-slot pick, to persist
+                onto `extra_data.slicer_ams_mapping` for a later reprint to reuse. Deliberately
+                a distinct parameter, not read off `print_data["ams_mapping"]` — that key is
+                populated on every MQTT print-start callback regardless of source (bambu_mqtt's
+                request-topic interception captures it for slicer-direct LAN prints too), so
+                promoting it unconditionally would stamp every archive on installs with no
+                virtual printer at all. Callers that gate this behind an opt-in (the VP-queue
+                "Save AMS mapping" toggle) pass it explicitly; everyone else leaves it unset.
+            slicer_ams_mapping_printer_id: The printer `slicer_ams_mapping`'s tray IDs were
+                resolved against. Required alongside `slicer_ams_mapping` — a global tray ID
+                only means something relative to one printer's specific AMS layout, so a
+                mapping saved without knowing which printer it came from can't be safely
+                reused later on any printer, including the same one (there'd be no way to
+                tell). A model-based VP with no fixed target printer has no valid value to
+                pass here and must leave both params unset.
         """
         # Verify printer exists if specified
         if printer_id is not None:
@@ -1251,6 +1273,25 @@ class ArchiveService:
         if print_data:
             metadata["_print_data"] = print_data
 
+        # Promote the slicer's own live-resolved AMS-slot pick, when the caller
+        # explicitly opted in (see the `slicer_ams_mapping` param docstring for
+        # why this is NOT read off `print_data["ams_mapping"]`), to a stable
+        # top-level extra_data key. Lets a later reprint reuse the exact tray
+        # the user picked/BambuStudio auto-matched at slice time instead of the
+        # scheduler re-deriving one from just the file's static type/color,
+        # which can land on the wrong physical spool when that match isn't
+        # unique. Top-level (not nested under the `_print_data` diagnostic bag)
+        # so API consumers have a single stable path:
+        # `archive.extra_data.slicer_ams_mapping`. Stored together with the
+        # printer it was resolved against — see `slicer_ams_mapping_printer_id`
+        # param docstring — so a later reprint can tell whether it's even
+        # applicable before trying to reuse it.
+        if slicer_ams_mapping and slicer_ams_mapping_printer_id is not None:
+            metadata["slicer_ams_mapping"] = {
+                "mapping": slicer_ams_mapping,
+                "printer_id": slicer_ams_mapping_printer_id,
+            }
+
         # Determine status and timestamps
         status = print_data.get("status", "completed") if print_data else "archived"
         started_at = datetime.now(timezone.utc) if status == "printing" else None
@@ -1292,7 +1333,17 @@ class ArchiveService:
             file_size=dest_file.stat().st_size,
             content_hash=content_hash,
             thumbnail_path=thumbnail_path,
-            print_name=display_stem if prefer_filename_for_name else (metadata.get("print_name") or display_stem),
+            # clean_display_name because the 3MF's own metadata reaches this
+            # verbatim, and a control character in it renders nowhere and
+            # truncates somewhere (#2832). The schema does the same for names
+            # arriving over the API. Cleaned before the fallback rather than
+            # after it, so an embedded name that is only whitespace still falls
+            # through to the filename instead of leaving the archive nameless.
+            print_name=(
+                clean_display_name(display_stem)
+                if prefer_filename_for_name
+                else (clean_display_name(metadata.get("print_name")) or clean_display_name(display_stem))
+            ),
             print_time_seconds=metadata.get("print_time_seconds"),
             filament_used_grams=metadata.get("filament_used_grams"),
             filament_type=metadata.get("filament_type"),
@@ -1314,6 +1365,8 @@ class ArchiveService:
             extra_data=metadata,
             created_by_id=created_by_id,
             project_id=project_id,
+            library_file_id=library_file_id,
+            cost_center_id=cost_center_id,
             subtask_id=subtask_id,
             plate_id=plate_id,
         )

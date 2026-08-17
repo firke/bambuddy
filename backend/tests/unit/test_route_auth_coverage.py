@@ -114,8 +114,6 @@ _PUBLIC_ROUTES: frozenset[tuple[str, str]] = frozenset(
         ("GET", "/manifest.json"),
         ("GET", "/sw-register.js"),
         ("GET", "/sw.js"),
-        ("GET", "/gcode-viewer/"),
-        ("GET", "/gcode-viewer/{file_path:path}"),
         # SPA catch-all — serves index.html for client-side routing. No backend data path.
         ("GET", "/{full_path:path}"),
         # ---- WebSocket routes ----

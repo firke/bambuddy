@@ -427,6 +427,25 @@ class TestNotificationsAPI:
         response = await async_client.get(f"/api/v1/notifications/{provider.id}")
         assert response.json()["on_print_missing_spool_assignment"] is True
 
+    @pytest.mark.asyncio
+    @pytest.mark.integration
+    async def test_update_billing_charge_failed_toggle(
+        self, async_client: AsyncClient, notification_provider_factory, db_session
+    ):
+        """Billing alerts can be enabled independently for each provider."""
+        provider = await notification_provider_factory(on_billing_charge_failed=True)
+
+        response = await async_client.patch(
+            f"/api/v1/notifications/{provider.id}",
+            json={"on_billing_charge_failed": False},
+        )
+
+        assert response.status_code == 200
+        assert response.json()["on_billing_charge_failed"] is False
+
+        response = await async_client.get(f"/api/v1/notifications/{provider.id}")
+        assert response.json()["on_billing_charge_failed"] is False
+
 
 class TestNotificationTemplatesAPI:
     """Integration tests for /api/v1/notification-templates/ endpoints."""

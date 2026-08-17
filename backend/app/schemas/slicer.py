@@ -1,6 +1,6 @@
 """Pydantic schemas for slice requests."""
 
-from typing import Literal
+from typing import Any, Literal
 
 from pydantic import BaseModel, Field, model_validator
 
@@ -82,6 +82,30 @@ class SliceRequest(BaseModel):
         default=False,
         description="If true, request a 3MF response with embedded G-code instead of raw G-code.",
     )
+    design_overrides: list[str] | None = Field(
+        default=None,
+        description=(
+            "3MF only. Process setting keys from the source file's "
+            "``different_settings_to_system`` to carry onto the picked process "
+            "preset (#2622) — the designer's own wall count, infill, first-layer "
+            "height and so on, which ``--load-settings`` would otherwise discard. "
+            "Only keys the source actually lists as changed are applied; anything "
+            "else is ignored. ``None``/empty means a plain profile slice."
+        ),
+    )
+    process_overrides: dict[str, Any] | None = Field(
+        default=None,
+        description=(
+            "The user's own process-setting edits from the slice modal's settings "
+            "panel, as a sparse ``{option_key: value}`` map (layer height, wall "
+            "count, supports, speeds — OrcaSlicer's process parameter set). Written "
+            "into the process JSON *after* the source's support settings and the "
+            "designer's carried tweaks, so an explicit choice here wins over both. "
+            "Values are normalised to the string forms a process preset stores; "
+            "keys that aren't valid config keys are dropped rather than failing "
+            "the slice. ``None``/empty leaves the picked preset untouched."
+        ),
+    )
     use_embedded_settings: bool = Field(
         default=False,
         description=(
@@ -106,6 +130,27 @@ class SliceRequest(BaseModel):
             "'High Temp Plate', 'Textured PEI Plate', 'Smooth PEI Plate', "
             "'Cool Plate (SuperTack)', 'Supertack Plate'. None ⇒ inherit from the "
             "process preset unchanged (#1337)."
+        ),
+    )
+    auto_orient: bool = Field(
+        default=False,
+        description=(
+            "Let the slicer pick each object's orientation before slicing "
+            "(BambuStudio / OrcaSlicer ``--orient 1``, the GUI's 'Auto orient'). "
+            "Off by default: it rotates geometry, so a model the designer laid "
+            "flat on purpose would silently change. Applies on the embedded-"
+            "settings path too — it is a CLI action, not a profile value (#2548)."
+        ),
+    )
+    auto_arrange: bool = Field(
+        default=False,
+        description=(
+            "Let the slicer lay the objects out on the plate before slicing "
+            "(``--arrange 1``, the GUI's 'Auto arrange'). Off by default: it "
+            "repositions objects, discarding a deliberate layout. Forced on "
+            "regardless for cross-nozzle-class re-slices, where the source's "
+            "coordinates land in the target's dead zone (#1493). Applies on the "
+            "embedded-settings path too (#2548)."
         ),
     )
 
@@ -166,6 +211,13 @@ class SliceResponse(BaseModel):
     filament_used_g: float
     filament_used_mm: float
     used_embedded_settings: bool = False
+    # Set when the source lives in an external folder that could not receive
+    # the result (read-only, unreachable, not writable), so the file went to
+    # managed storage instead. Names which of those it was. ``None`` on every
+    # normal slice. Reported rather than silently absorbed: filing the output
+    # somewhere the user isn't looking, with no signal, is what made #2810
+    # impossible to reproduce from the UI.
+    external_write_fallback: str | None = None
 
 
 class SliceArchiveResponse(BaseModel):

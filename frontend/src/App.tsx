@@ -7,6 +7,7 @@ import { ArchivesPage } from './pages/ArchivesPage';
 import { QueuePage } from './pages/QueuePage';
 import { StatsPage } from './pages/StatsPage';
 import { SettingsPage } from './pages/SettingsPage';
+import { FinancePage } from './pages/FinancePage';
 import { ProfilesPage } from './pages/ProfilesPage';
 import { MaintenancePage } from './pages/MaintenancePage';
 import { ProjectsPage } from './pages/ProjectsPage';
@@ -26,6 +27,7 @@ import { SetupPage } from './pages/SetupPage';
 import { NotificationsPage } from './pages/NotificationsPage';
 import { GCodeViewerPage } from './pages/GCodeViewerPage';
 import { useWebSocket } from './hooks/useWebSocket';
+import { usePrintProgressTitle } from './hooks/usePrintProgressTitle';
 import { useStreamTokenSync } from './hooks/useCameraStreamToken';
 import { ThemeProvider } from './contexts/ThemeContext';
 import { ToastProvider } from './contexts/ToastContext';
@@ -89,6 +91,7 @@ function StreamTokenSync() {
 
 function WebSocketProvider({ children }: { children: React.ReactNode }) {
   useWebSocket();
+  usePrintProgressTitle();
   return <>{children}</>;
 }
 
@@ -209,6 +212,7 @@ function App() {
                   <Route path="pipelines/runs" element={<Navigate to="/queue?tab=pipelines" replace />} />
                   <Route path="stats" element={<StatsPage />} />
                   <Route path="profiles" element={<ProfilesPage />} />
+                  <Route path="finance" element={<PermissionRoute permission="cost_centers:read_own"><FinancePage /></PermissionRoute>} />
                   <Route path="maintenance" element={<MaintenancePage />} />
                   <Route path="projects" element={<ProjectsPage />} />
                   <Route path="projects/:id" element={<ProjectDetailPage />} />

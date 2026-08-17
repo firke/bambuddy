@@ -30,6 +30,7 @@ EVENT_NAMES = {
     "print_failed": "Print Failed",
     "print_stopped": "Print Stopped",
     "print_progress": "Print Progress",
+    "billing_charge_failed": "Billing Charge Failed",
     "printer_offline": "Printer Offline",
     "printer_error": "Printer Error",
     "filament_low": "Filament Low",

@@ -46,12 +46,15 @@ from backend.app.services.bambu_ftp import (
     delete_file_async,
     download_file_bytes_async,
     download_file_try_paths_async,
+    ftps_handshake_blocked,
     get_cached_3mf,
     get_storage_info_async,
     list_files_async,
 )
+from backend.app.services.print_storage import print_file_reachable_over_ftp
 from backend.app.services.printer_diagnostic import run_connection_diagnostic
 from backend.app.services.printer_manager import (
+    display_temperatures,
     drying_screen_only,
     get_derived_status_name,
     printer_manager,
@@ -61,9 +64,11 @@ from backend.app.services.printer_manager import (
     supports_chamber_temp,
     supports_drying,
     supports_drying_while_printing,
+    uniform_tray_filament_hint,
 )
 from backend.app.utils.filament_ids import filament_id_to_setting_id
 from backend.app.utils.http import build_content_disposition
+from backend.app.utils.printer_models import MAX_CHAMBER_TEMP_C, uses_exhaust_fan_label
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/printers", tags=["printers"])
@@ -575,20 +580,12 @@ async def get_printer_status(
                     dry_target_temp = None
             if target_fil_val:
                 dry_filament = str(target_fil_val)
-            # Fallback: derive from first loaded tray when no cached target
-            # (drying started in a previous backend session, or cache wasn't
-            # seeded). Mirrors the popover seed heuristic.
-            if dry_target_temp is None or not dry_filament:
-                for tray in trays:
-                    if tray.tray_type:
-                        if not dry_filament:
-                            dry_filament = str(tray.tray_type)
-                        if dry_target_temp is None and tray.drying_temp:
-                            try:
-                                dry_target_temp = int(tray.drying_temp)
-                            except (TypeError, ValueError):
-                                pass
-                        break
+            # Fallback: name the filament from the loaded trays when there is no
+            # cached target (drying started in a previous backend session, or
+            # the cache wasn't seeded), and only when they agree. The
+            # temperature has no fallback — see uniform_tray_filament_hint.
+            if not dry_filament:
+                dry_filament = uniform_tray_filament_hint([tray.tray_type or "" for tray in trays])
 
             ams_units.append(
                 AMSUnit(
@@ -798,6 +795,8 @@ async def get_printer_status(
         big_fan1_speed=state.big_fan1_speed,
         big_fan2_speed=state.big_fan2_speed,
         heatbreak_fan_speed=state.heatbreak_fan_speed,
+        left_aux_fan_speed=state.left_aux_fan_speed,
+        exhaust_fan_present=state.exhaust_fan_present,
         firmware_version=state.firmware_version,
         developer_mode=state.developer_mode if state else None,
         ams_filament_backup=state.ams_filament_backup if state else None,
@@ -866,6 +865,7 @@ async def get_overlay_status(
             "layer_num": None,
             "total_layers": None,
             "stg_cur_name": None,
+            "temperatures": {},
             "time_format": time_format,
         }
 
@@ -882,6 +882,9 @@ async def get_overlay_status(
         "layer_num": state.layer_num,
         "total_layers": state.total_layers,
         "stg_cur_name": get_derived_status_name(state, printer.model),
+        # Nozzle / bed / chamber readings for the overlay's temperature fields
+        # (#1422). Filtered rather than passed through: see display_temperatures.
+        "temperatures": display_temperatures(state.temperatures, printer.model),
         "time_format": time_format,
     }
 
@@ -1215,6 +1218,19 @@ async def _produce_cover_image(
             break
 
     if not downloaded:
+        # The cover lives inside the 3MF, so it is only reachable if the 3MF is.
+        # When the printer kept the print on internal storage there is nothing
+        # at any of these paths, and walking all sixteen of them just to end on
+        # a 404 that reads as "this print has no cover" helps nobody (#2780).
+        storage = print_file_reachable_over_ftp(printer_manager.get_status(printer_id))
+        if not storage.reachable:
+            _cover_404_cache.setdefault(printer_id, set()).add(cache_key)
+            raise HTTPException(
+                404,
+                f"The print file for '{subtask_name}' is not on storage Bambuddy can read over FTPS "
+                f"({storage.reason}), so it has no cover to extract.",
+            )
+
         logger.info(
             f"Trying to download cover for '{subtask_name}' from {printer.ip_address} (trying {len(remote_paths)} paths)"
         )
@@ -1224,6 +1240,16 @@ async def _produce_cover_image(
         last_error = None
 
         for attempt in range(max_retries + 1):
+            if ftps_handshake_blocked(printer.ip_address):
+                # Nothing to retry: the printer is not completing a TLS
+                # handshake on port 990, so no path and no attempt reaches it
+                # (#2780). Report the real cause instead of the 404 below,
+                # which would read as "this print has no cover".
+                raise HTTPException(
+                    503,
+                    f"Printer {printer.ip_address} is not answering its file service over TLS. "
+                    "Bambuddy will try again shortly.",
+                )
             try:
                 downloaded = await download_file_try_paths_async(
                     printer.ip_address,
@@ -2026,6 +2052,15 @@ async def stop_drying(
     success = printer_manager.send_drying_command(printer_id, ams_id, temp=0, duration=0, mode=0)
     if not success:
         raise HTTPException(400, "Printer not connected")
+
+    # A cycle the user stopped by hand tells us nothing about whether drying can
+    # move the humidity reading, so it must not count towards the auto-drying
+    # suspension (#2770). Imported here rather than at module scope to keep the
+    # existing routes/scheduler import direction.
+    from backend.app.services.print_scheduler import scheduler as print_scheduler
+
+    print_scheduler.forget_auto_dry_cycle(printer_id, ams_id)
+
     return {"status": "drying_stopped", "ams_id": ams_id}
 
 
@@ -2138,17 +2173,31 @@ async def get_inventory_remain(
     the dispatcher uses (#1766). Works for both internal inventory and
     Spoolman; unbound slots are absent from the map (client falls back to the
     printer's MQTT `remain` for those).
+
+    `slot_materials` carries the same bindings with their material identity and
+    extruder side attached, which is what the modal's pre-flight filament check
+    needs to pool spools under AMS Filament Backup the way the dispatcher does.
+    It is deliberately server-computed: the identity rule lives in
+    `filament_deficit`, and a client-side reimplementation of it is exactly how
+    the modal came to block prints the dispatcher would have accepted. Unlike
+    `inventory_remain_g` it covers every binding, not just currently-loaded
+    slots — again matching what the dispatcher pools.
     """
+    from backend.app.services.filament_deficit import build_slot_materials
     from backend.app.services.print_scheduler import PrintScheduler
 
     state = printer_manager.get_status(printer_id)
     if not state:
-        return {"inventory_remain_g": {}}
+        return {"inventory_remain_g": {}, "slot_materials": []}
 
     scheduler = PrintScheduler()
     loaded = scheduler._build_loaded_filaments(state)
     overrides = await scheduler._build_inventory_remain_overrides(db, printer_id, loaded)
-    return {"inventory_remain_g": {str(k): v for k, v in overrides.items()}}
+    slot_materials = await build_slot_materials(db, printer_id)
+    return {
+        "inventory_remain_g": {str(k): v for k, v in overrides.items()},
+        "slot_materials": [s.to_dict() for s in slot_materials],
+    }
 
 
 # ============================================
@@ -3160,7 +3209,12 @@ async def set_bed_temperature(
 @router.post("/{printer_id}/temperature/chamber")
 async def set_chamber_temperature(
     printer_id: int,
-    target: int = Query(..., ge=0, le=60, description="Target chamber temperature in Celsius; 0 turns heating off"),
+    target: int = Query(
+        ...,
+        ge=0,
+        le=MAX_CHAMBER_TEMP_C,
+        description="Target chamber temperature in Celsius; 0 turns heating off",
+    ),
     _=RequirePermissionIfAuthEnabled(Permission.PRINTERS_CONTROL),
     db: AsyncSession = Depends(get_db),
 ):
@@ -3193,16 +3247,28 @@ async def set_chamber_temperature(
 @router.post("/{printer_id}/fan-speed")
 async def set_fan_speed(
     printer_id: int,
-    fan: str = Query(..., description="Fan to control: part, aux, or chamber"),
+    fan: str = Query(..., description="Fan to control: part, aux, aux2 (left aux), or chamber"),
     speed: int = Query(..., ge=0, le=100, description="Fan speed percentage"),
     _=RequirePermissionIfAuthEnabled(Permission.PRINTERS_CONTROL),
     db: AsyncSession = Depends(get_db),
 ):
-    """Set a fan speed by percentage."""
-    fan_ids = {"part": 1, "aux": 2, "chamber": 3}
+    """Set a fan speed by percentage.
+
+    Fan index 10 ("aux2") is the optional left auxiliary part cooling fan on
+    P2S/X2D — driven with "M106 P10" exactly like Bambu's official machine
+    profile gcode does. It only exists when the printer reports airduct part 10,
+    so the request is rejected rather than sending M106 P10 into the void on a
+    machine that has no such fan.
+
+    That gate also rejects for the short window between connecting and the
+    first airduct push, when nothing is known about the fan yet. The card hides
+    the badge over the same window, so there is no control to click; a direct
+    API caller gets a 400 and should retry once the status reports the fan.
+    """
+    fan_ids = {"part": 1, "aux": 2, "chamber": 3, "aux2": 10}
     fan_id = fan_ids.get(fan)
     if fan_id is None:
-        raise HTTPException(400, "fan must be 'part', 'aux', or 'chamber'")
+        raise HTTPException(400, "fan must be 'part', 'aux', 'aux2', or 'chamber'")
 
     result = await db.execute(select(Printer).where(Printer.id == printer_id))
     printer = result.scalar_one_or_none()
@@ -3213,12 +3279,31 @@ async def set_fan_speed(
     if not client:
         raise HTTPException(400, "Printer not connected")
 
+    # Presence gate for the accessory fan. Without this, aux2 is accepted for
+    # every model and an A1 would be sent M106 P10 for a fan it does not have.
+    # The UI already hides the badge; this closes the same hole on the API.
+    if fan == "aux2" and getattr(client.state, "left_aux_fan_speed", None) is None:
+        raise HTTPException(
+            400,
+            "This printer does not report a left auxiliary fan "
+            "(no airduct part 10). The fan is an accessory kit on the P2S "
+            "and factory-fitted on the X2D.",
+        )
+
     pwm_speed = round(speed * 255 / 100)
     success = client.set_fan_speed(fan_id, pwm_speed)
     if not success:
         raise HTTPException(500, "Failed to set fan speed")
 
-    fan_names = {"part": "Part cooling fan", "aux": "Auxiliary fan", "chamber": "Chamber fan"}
+    # The enclosure fan is called "Exhaust" on P2S/X2D and "Chamber" elsewhere;
+    # match whatever the printer card badge shows so the toast agrees with the
+    # control the user just clicked.
+    fan_names = {
+        "part": "Part cooling fan",
+        "aux": "Auxiliary fan",
+        "aux2": "Left auxiliary fan",
+        "chamber": "Exhaust fan" if uses_exhaust_fan_label(printer.model) else "Chamber fan",
+    }
     return {"success": True, "message": f"{fan_names[fan]} set to {speed}%"}
 
 

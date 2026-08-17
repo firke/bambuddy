@@ -27,6 +27,11 @@ def _set_sqlite_pragmas(dbapi_conn, connection_record):
 # /system/db-pool can report it without re-deriving the dialect defaults.
 _pool_config: dict = {}
 
+# What the PostgreSQL server itself will allow, read once at startup. None on
+# SQLite, or when the probe could not run. Reported by get_pool_status() so a
+# support bundle carries both sides of the comparison.
+_server_connection_limits: dict | None = None
+
 
 def _resolve_pool_kwargs() -> dict:
     """Build the pool kwargs for ``create_async_engine`` (issue #2572).
@@ -151,6 +156,10 @@ def get_pool_status() -> dict:
     return {
         "dialect": "sqlite" if is_sqlite() else "postgresql",
         "config": dict(_pool_config),
+        # Both sides of the ceiling-vs-server comparison, so a support bundle
+        # shows whether a TooManyConnectionsError was a misconfiguration or a
+        # genuine leak. None on SQLite or if the startup probe couldn't run.
+        "server_limits": dict(_server_connection_limits) if _server_connection_limits else None,
         **gauges,
     }
 
@@ -241,6 +250,7 @@ async def get_db() -> AsyncSession:
 async def init_db():
     # Import models to register them with SQLAlchemy
     from backend.app.models import (  # noqa: F401
+        active_print_session,
         active_print_spoolman,
         ams_history,
         ams_label,
@@ -252,6 +262,7 @@ async def init_db():
         external_link,
         filament,
         filament_sku_settings,
+        finance,
         github_backup,
         group,
         kprofile_note,
@@ -270,6 +281,7 @@ async def init_db():
         print_log,
         print_queue,
         printer,
+        printer_ha_sensor,
         printer_sensor_history,
         project,
         project_bom,
@@ -316,6 +328,107 @@ async def init_db():
     # Seed default catalog entries
     await seed_spool_catalog()
     await seed_color_catalog()
+
+    await check_pool_fits_server()
+
+
+async def check_pool_fits_server() -> None:
+    """Warn when the pool may ask PostgreSQL for more connections than it allows.
+
+    ``pool_size + max_overflow`` is the most connections one worker process will
+    ever open. If that exceeds what the server permits, the pool never reaches
+    its own limit and so never queues: it goes straight to the server, which
+    refuses with ``TooManyConnectionsError``. That surfaces wherever the next
+    connection happened to be needed — in the reported case, halfway through a
+    queue dispatch, which then left an expected-print registration and a dispatch
+    claim behind (#2702 follow-up).
+
+    The distinction is worth knowing when reading a log: SQLAlchemy's own
+    ``QueuePool limit ... timed out`` means the pool is the bottleneck (too much
+    concurrency, or connections held too long), whereas asyncpg's
+    ``TooManyConnectionsError`` means the pool's ceiling is above the server's.
+
+    Not clamped, deliberately. Pool sizes are fixed when the engine is created,
+    which happens at import — before any connection exists to ask the server
+    with — and ``engine`` / ``async_session`` are imported by name in ~150 places,
+    so swapping the engine afterwards would leave stale references. The correct
+    ceiling also depends on the worker count and on anything else sharing the
+    server, neither of which Bambuddy can see. So this reports the mismatch with
+    both numbers and the knobs to fix it, and leaves the choice to the operator.
+    """
+    global _server_connection_limits
+    if is_sqlite():
+        return
+
+    from sqlalchemy import text
+
+    in_use: int | None = None
+    try:
+        async with engine.connect() as conn:
+            max_conn = int((await conn.execute(text("SHOW max_connections"))).scalar_one())
+            reserved = int((await conn.execute(text("SHOW superuser_reserved_connections"))).scalar_one())
+            try:
+                in_use = int(
+                    (
+                        await conn.execute(
+                            text("SELECT count(*) FROM pg_stat_activity WHERE backend_type = 'client backend'")
+                        )
+                    ).scalar_one()
+                )
+            except Exception as exc:
+                # `pg_stat_activity.backend_type` is PostgreSQL 10+, and a
+                # restricted role sees fewer rows. The count is a nice-to-have
+                # for spotting other clients; the warning itself only needs the
+                # two settings above, so losing it must not cost the warning.
+                # Done last on purpose: a failed statement can abort the
+                # transaction, and nothing else uses this connection after it.
+                logger.debug("Could not count client backends: %s", exc)
+    except Exception as exc:
+        # A diagnostic must never be the reason startup fails. An older server
+        # or a restricted role may refuse these.
+        logger.debug("Could not read PostgreSQL connection limits: %s", exc)
+        return
+
+    available = max_conn - reserved
+    ceiling = _pool_config.get("pool_size", 0) + _pool_config.get("max_overflow", 0)
+    _server_connection_limits = {
+        "max_connections": max_conn,
+        "superuser_reserved_connections": reserved,
+        "available_to_bambuddy": available,
+        "client_backends_at_startup": in_use,
+        "pool_ceiling_per_worker": ceiling,
+    }
+
+    if ceiling > available:
+        in_use_note = (
+            f" {in_use} client connection(s) are open on the server right now, including "
+            "this one — a count well above 1 means something else shares it."
+            if in_use is not None
+            else ""
+        )
+        logger.warning(
+            "DB pool may exceed what PostgreSQL allows: this worker can open up to %d "
+            "connections (pool_size %d + max_overflow %d) but the server permits %d "
+            "(max_connections %d minus %d reserved for superusers).%s Exhaustion surfaces "
+            "as TooManyConnectionsError at whatever ran next, not as a pool timeout. "
+            "Lower DB_POOL_SIZE / DB_MAX_OVERFLOW, or raise the server's "
+            "max_connections — and account for every worker process and any other "
+            "client sharing this server.",
+            ceiling,
+            _pool_config.get("pool_size", 0),
+            _pool_config.get("max_overflow", 0),
+            available,
+            max_conn,
+            reserved,
+            in_use_note,
+        )
+    else:
+        logger.info(
+            "DB pool fits the server: up to %d connection(s) per worker, %d available (max_connections %d).",
+            ceiling,
+            available,
+            max_conn,
+        )
 
 
 # B2: Module-level counter exposing the number of rows skipped during the last
@@ -913,6 +1026,219 @@ async def _migrate_widen_spoolman_slot_ams_id_range(conn) -> None:
         raise
 
 
+async def _migrate_create_finance_tables(conn) -> None:
+    """Create finance tables missing from databases that predate billing.
+
+    ``Base.metadata.create_all()`` covers fresh installs, but upgrade and
+    restore paths can run the handwritten migrations against an existing
+    PostgreSQL schema.  The finance column migrations below must therefore not
+    assume these tables already exist.
+
+    ``UserWallet`` is mapped to ``user_wallets``.
+    """
+    if is_sqlite():
+        statements = [
+            """
+            CREATE TABLE IF NOT EXISTS cost_centers (
+                id INTEGER PRIMARY KEY,
+                code VARCHAR(32) NOT NULL UNIQUE,
+                name VARCHAR(150) NOT NULL,
+                is_active BOOLEAN NOT NULL DEFAULT 1,
+                is_private BOOLEAN NOT NULL DEFAULT 0,
+                owner_user_id INTEGER REFERENCES users(id) ON DELETE SET NULL,
+                total_budget NUMERIC(14,2),
+                monthly_budget NUMERIC(14,2),
+                created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
+            )
+            """,
+            """
+            CREATE TABLE IF NOT EXISTS user_wallets (
+                id INTEGER PRIMARY KEY,
+                user_id INTEGER NOT NULL UNIQUE REFERENCES users(id) ON DELETE CASCADE,
+                balance NUMERIC(14,2) NOT NULL DEFAULT 0.0,
+                currency VARCHAR(3) NOT NULL DEFAULT 'EUR',
+                updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
+            )
+            """,
+            """
+            CREATE TABLE IF NOT EXISTS cost_center_members (
+                id INTEGER PRIMARY KEY,
+                cost_center_id INTEGER NOT NULL REFERENCES cost_centers(id) ON DELETE CASCADE,
+                user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+                can_print BOOLEAN NOT NULL DEFAULT 1,
+                created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                CONSTRAINT uq_cost_center_members_cc_user UNIQUE (cost_center_id, user_id)
+            )
+            """,
+            """
+            CREATE TABLE IF NOT EXISTS wallet_transactions (
+                id INTEGER PRIMARY KEY,
+                user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+                cost_center_id INTEGER REFERENCES cost_centers(id) ON DELETE SET NULL,
+                transaction_type VARCHAR(40) NOT NULL,
+                amount NUMERIC(14,2) NOT NULL,
+                balance_after NUMERIC(14,2),
+                description TEXT,
+                created_by_user_id INTEGER REFERENCES users(id) ON DELETE SET NULL,
+                print_run_id VARCHAR(100),
+                print_archive_id INTEGER REFERENCES print_archives(id) ON DELETE SET NULL,
+                print_queue_id INTEGER REFERENCES print_queue(id) ON DELETE SET NULL,
+                is_voided BOOLEAN NOT NULL DEFAULT 0,
+                created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                CONSTRAINT ck_wallet_transactions_transaction_type CHECK (
+                    transaction_type IN ('print_charge', 'deposit', 'withdraw', 'manual_adjustment')
+                )
+            )
+            """,
+            """
+            CREATE TABLE IF NOT EXISTS budget_reservations (
+                id INTEGER PRIMARY KEY,
+                cost_center_id INTEGER NOT NULL REFERENCES cost_centers(id) ON DELETE CASCADE,
+                amount NUMERIC(14,2) NOT NULL,
+                status VARCHAR(20) NOT NULL,
+                source_type VARCHAR(50) NOT NULL,
+                source_id INTEGER,
+                print_archive_id INTEGER REFERENCES print_archives(id) ON DELETE SET NULL,
+                created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                released_at DATETIME
+            )
+            """,
+        ]
+    else:
+        statements = [
+            """
+            CREATE TABLE IF NOT EXISTS cost_centers (
+                id SERIAL PRIMARY KEY,
+                code VARCHAR(32) NOT NULL UNIQUE,
+                name VARCHAR(150) NOT NULL,
+                is_active BOOLEAN NOT NULL DEFAULT TRUE,
+                is_private BOOLEAN NOT NULL DEFAULT FALSE,
+                owner_user_id INTEGER REFERENCES users(id) ON DELETE SET NULL,
+                total_budget NUMERIC(14,2),
+                monthly_budget NUMERIC(14,2),
+                created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+            )
+            """,
+            """
+            CREATE TABLE IF NOT EXISTS user_wallets (
+                id SERIAL PRIMARY KEY,
+                user_id INTEGER NOT NULL UNIQUE REFERENCES users(id) ON DELETE CASCADE,
+                balance NUMERIC(14,2) NOT NULL DEFAULT 0.0,
+                currency VARCHAR(3) NOT NULL DEFAULT 'EUR',
+                updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+            )
+            """,
+            """
+            CREATE TABLE IF NOT EXISTS cost_center_members (
+                id SERIAL PRIMARY KEY,
+                cost_center_id INTEGER NOT NULL REFERENCES cost_centers(id) ON DELETE CASCADE,
+                user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+                can_print BOOLEAN NOT NULL DEFAULT TRUE,
+                created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                CONSTRAINT uq_cost_center_members_cc_user UNIQUE (cost_center_id, user_id)
+            )
+            """,
+            """
+            CREATE TABLE IF NOT EXISTS wallet_transactions (
+                id SERIAL PRIMARY KEY,
+                user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+                cost_center_id INTEGER REFERENCES cost_centers(id) ON DELETE SET NULL,
+                transaction_type VARCHAR(40) NOT NULL,
+                amount NUMERIC(14,2) NOT NULL,
+                balance_after NUMERIC(14,2),
+                description TEXT,
+                created_by_user_id INTEGER REFERENCES users(id) ON DELETE SET NULL,
+                print_run_id VARCHAR(100),
+                print_archive_id INTEGER REFERENCES print_archives(id) ON DELETE SET NULL,
+                print_queue_id INTEGER REFERENCES print_queue(id) ON DELETE SET NULL,
+                is_voided BOOLEAN NOT NULL DEFAULT FALSE,
+                created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                CONSTRAINT ck_wallet_transactions_transaction_type CHECK (
+                    transaction_type IN ('print_charge', 'deposit', 'withdraw', 'manual_adjustment')
+                )
+            )
+            """,
+            """
+            CREATE TABLE IF NOT EXISTS budget_reservations (
+                id SERIAL PRIMARY KEY,
+                cost_center_id INTEGER NOT NULL REFERENCES cost_centers(id) ON DELETE CASCADE,
+                amount NUMERIC(14,2) NOT NULL,
+                status VARCHAR(20) NOT NULL,
+                source_type VARCHAR(50) NOT NULL,
+                source_id INTEGER,
+                print_archive_id INTEGER REFERENCES print_archives(id) ON DELETE SET NULL,
+                created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                released_at TIMESTAMP
+            )
+            """,
+        ]
+
+    for statement in statements:
+        await _safe_execute(conn, statement)
+
+
+async def _migrate_create_finance_indexes(conn) -> None:
+    """Create finance indexes after legacy tables have received new columns."""
+    # Older billing migrations created this as a non-unique index. Recreate it
+    # so upgraded databases enforce the same constraint as the ORM model.
+    await _safe_execute(conn, "DROP INDEX IF EXISTS ix_cost_centers_code")
+    indexes = [
+        "CREATE UNIQUE INDEX IF NOT EXISTS ix_cost_centers_code ON cost_centers (code)",
+        "CREATE INDEX IF NOT EXISTS ix_cost_centers_name ON cost_centers (name)",
+        "CREATE UNIQUE INDEX IF NOT EXISTS ix_user_wallets_user_id ON user_wallets (user_id)",
+        "CREATE INDEX IF NOT EXISTS ix_cost_center_members_cost_center_id ON cost_center_members (cost_center_id)",
+        "CREATE INDEX IF NOT EXISTS ix_cost_center_members_user_id ON cost_center_members (user_id)",
+        "CREATE INDEX IF NOT EXISTS ix_wallet_transactions_user_id ON wallet_transactions (user_id)",
+        "CREATE INDEX IF NOT EXISTS ix_wallet_transactions_cost_center_id ON wallet_transactions (cost_center_id)",
+        "CREATE INDEX IF NOT EXISTS ix_wallet_transactions_transaction_type ON wallet_transactions (transaction_type)",
+        "CREATE INDEX IF NOT EXISTS ix_wallet_transactions_created_by_user_id "
+        "ON wallet_transactions (created_by_user_id)",
+        "CREATE INDEX IF NOT EXISTS ix_wallet_transactions_print_run_id ON wallet_transactions (print_run_id)",
+        "CREATE INDEX IF NOT EXISTS ix_wallet_transactions_print_archive_id ON wallet_transactions (print_archive_id)",
+        "CREATE INDEX IF NOT EXISTS ix_wallet_transactions_print_queue_id ON wallet_transactions (print_queue_id)",
+        "CREATE INDEX IF NOT EXISTS ix_wallet_transactions_created_at ON wallet_transactions (created_at)",
+        "CREATE INDEX IF NOT EXISTS ix_budget_reservations_cost_center_id ON budget_reservations (cost_center_id)",
+        "CREATE INDEX IF NOT EXISTS ix_budget_reservations_status ON budget_reservations (status)",
+        "CREATE INDEX IF NOT EXISTS ix_budget_reservations_source_type ON budget_reservations (source_type)",
+        "CREATE INDEX IF NOT EXISTS ix_budget_reservations_source_id ON budget_reservations (source_id)",
+        "CREATE INDEX IF NOT EXISTS ix_budget_reservations_print_archive_id ON budget_reservations (print_archive_id)",
+    ]
+    for statement in indexes:
+        await _safe_execute(conn, statement)
+
+
+async def _migrate_finance_money_to_numeric(conn) -> None:
+    """Convert persisted finance money columns on PostgreSQL upgrades."""
+    if is_sqlite():
+        # SQLite uses dynamic type affinity. New tables declare NUMERIC, while
+        # existing values remain protected by cent-rounding at write/rebuild.
+        return
+
+    columns = {
+        "cost_centers": ("total_budget", "monthly_budget"),
+        "user_wallets": ("balance",),
+        "wallet_transactions": ("amount", "balance_after"),
+        "budget_reservations": ("amount",),
+    }
+    for table_name, column_names in columns.items():
+        for column_name in column_names:
+            await _safe_execute(
+                conn,
+                f"ALTER TABLE {table_name} ALTER COLUMN {column_name} "
+                f"TYPE NUMERIC(14,2) USING ROUND({column_name}::numeric, 2)",
+            )
+
+
+async def _migrate_add_print_archive_cost_center(conn) -> None:
+    """Add the nullable cost-center link missing from pre-billing archives."""
+    await _safe_execute(
+        conn,
+        "ALTER TABLE print_archives ADD COLUMN cost_center_id INTEGER REFERENCES cost_centers(id) ON DELETE SET NULL",
+    )
+
+
 async def run_migrations(conn):
     """Run all schema migrations and data backfills on startup.
 
@@ -926,6 +1252,11 @@ async def run_migrations(conn):
     swallowed.
     """
     from sqlalchemy import text
+
+    # Existing PostgreSQL databases predate the finance ORM tables. These must
+    # exist before any ALTER TABLE / CREATE INDEX statements below reference
+    # them. Fresh installs remain idempotent because create_all() runs first.
+    await _migrate_create_finance_tables(conn)
 
     # Migration: Add parent_run_id column to pipeline_runs (#1425 PR C).
     # Links a retry-failed run back to its parent so the dashboard can show
@@ -946,6 +1277,12 @@ async def run_migrations(conn):
 
     # Migration: Add is_favorite column to print_archives
     await _safe_execute(conn, "ALTER TABLE print_archives ADD COLUMN is_favorite BOOLEAN DEFAULT 0")
+
+    # Migration: Add wallet_charge_skipped column to print_archives so deleted print charges stay deleted
+    if is_sqlite():
+        await _safe_execute(conn, "ALTER TABLE print_archives ADD COLUMN wallet_charge_skipped BOOLEAN DEFAULT 0")
+    else:
+        await _safe_execute(conn, "ALTER TABLE print_archives ADD COLUMN wallet_charge_skipped BOOLEAN DEFAULT FALSE")
 
     # Migration: Add content_hash column to print_archives for duplicate detection
     await _safe_execute(conn, "ALTER TABLE print_archives ADD COLUMN content_hash VARCHAR(64)")
@@ -981,6 +1318,35 @@ async def run_migrations(conn):
     # Migration: Add is_deleted column to maintenance_types for soft-deletes
     await _safe_execute(conn, "ALTER TABLE maintenance_types ADD COLUMN is_deleted BOOLEAN DEFAULT 0")
 
+    # Migration: Add cost_center columns expected by current finance model
+    await _safe_execute(conn, "ALTER TABLE cost_centers ADD COLUMN code VARCHAR(32)")
+    if is_sqlite():
+        await _safe_execute(conn, "ALTER TABLE cost_centers ADD COLUMN is_private BOOLEAN DEFAULT 0")
+    else:
+        await _safe_execute(conn, "ALTER TABLE cost_centers ADD COLUMN is_private BOOLEAN DEFAULT FALSE")
+    await _safe_execute(
+        conn,
+        "ALTER TABLE cost_centers ADD COLUMN owner_user_id INTEGER REFERENCES users(id) ON DELETE SET NULL",
+    )
+    await _safe_execute(conn, "ALTER TABLE cost_centers ADD COLUMN total_budget NUMERIC(14,2)")
+    await _safe_execute(conn, "ALTER TABLE cost_centers ADD COLUMN monthly_budget NUMERIC(14,2)")
+    timestamp_type = "DATETIME" if is_sqlite() else "TIMESTAMP"
+    await _safe_execute(conn, f"ALTER TABLE cost_centers ADD COLUMN created_at {timestamp_type}")
+    await _safe_execute(conn, f"ALTER TABLE cost_centers ADD COLUMN updated_at {timestamp_type}")
+
+    # Backfill empty cost center codes on upgraded databases.
+    if is_sqlite():
+        await _safe_execute(
+            conn,
+            "UPDATE cost_centers SET code = lower(hex(randomblob(6))) WHERE code IS NULL OR trim(code) = ''",
+        )
+    else:
+        await _safe_execute(
+            conn,
+            "UPDATE cost_centers SET code = substr(md5(random()::text || clock_timestamp()::text), 1, 12) "
+            "WHERE code IS NULL OR btrim(code) = ''",
+        )
+
     # Migration: Add custom_interval_type column to printer_maintenance
     await _safe_execute(conn, "ALTER TABLE printer_maintenance ADD COLUMN custom_interval_type VARCHAR(20)")
 
@@ -998,6 +1364,15 @@ async def run_migrations(conn):
     # Migration: Add daily digest columns to notification_providers
     await _safe_execute(conn, "ALTER TABLE notification_providers ADD COLUMN daily_digest_enabled BOOLEAN DEFAULT 0")
     await _safe_execute(conn, "ALTER TABLE notification_providers ADD COLUMN daily_digest_time VARCHAR(5)")
+
+    # Migration: Add print_run_id to wallet_transactions so repeated prints of the same archive
+    # can be billed independently without mutating archive history.
+    await _safe_execute(conn, "ALTER TABLE wallet_transactions ADD COLUMN print_run_id VARCHAR(100)")
+
+    # CREATE TABLE IF NOT EXISTS is a no-op for an older, incomplete table.
+    # Delay indexes until every legacy column they reference has been added.
+    await _migrate_finance_money_to_numeric(conn)
+    await _migrate_create_finance_indexes(conn)
 
     # Migration: Add missing-spool-assignment print-start notification toggle
     try:
@@ -1054,6 +1429,16 @@ async def run_migrations(conn):
     await _safe_execute(
         conn,
         "CREATE UNIQUE INDEX IF NOT EXISTS uq_oidc_link_user_provider ON user_oidc_links (user_id, provider_id)",
+    )
+
+    # Migration: Add unique indexes to prevent duplicate print-charge transactions
+    await _safe_execute(
+        conn,
+        "CREATE UNIQUE INDEX IF NOT EXISTS uq_wallet_transactions_print_run ON wallet_transactions (transaction_type, print_run_id)",
+    )
+    await _safe_execute(
+        conn,
+        "CREATE UNIQUE INDEX IF NOT EXISTS uq_wallet_transactions_archive ON wallet_transactions (transaction_type, print_archive_id)",
     )
 
     # Migration: Create FTS5 virtual table for archive full-text search (SQLite only)
@@ -1210,6 +1595,20 @@ async def run_migrations(conn):
     # Migration: Add manual_start column to print_queue for staged prints
     await _safe_execute(conn, "ALTER TABLE print_queue ADD COLUMN manual_start BOOLEAN DEFAULT 0")
 
+    # Migration: Add cost_center_id column to print_queue for billing metadata
+    try:
+        async with conn.begin_nested():
+            await conn.execute(
+                text(
+                    "ALTER TABLE print_queue ADD COLUMN cost_center_id INTEGER REFERENCES cost_centers(id) ON DELETE SET NULL"
+                )
+            )
+    except (OperationalError, ProgrammingError):
+        pass  # Already applied
+
+    # Migration: Add cost_center_id column to print_archives for billing metadata
+    await _migrate_add_print_archive_cost_center(conn)
+
     # Migration: Add wiki_url column to maintenance_types for documentation links
     await _safe_execute(conn, "ALTER TABLE maintenance_types ADD COLUMN wiki_url VARCHAR(500)")
 
@@ -1266,6 +1665,15 @@ async def run_migrations(conn):
             conn, "ALTER TABLE virtual_printers ADD COLUMN queue_force_color_match BOOLEAN DEFAULT FALSE"
         )
 
+    # Migration: Add save_ams_mapping column to virtual_printers. Opt-in flag:
+    # when true, VP queue-mode uploads persist the slicer's own AMS-slot pick
+    # onto the archive (`extra_data.slicer_ams_mapping`) for reuse on reprint.
+    # Default false to preserve current behaviour for upgraders.
+    if is_sqlite():
+        await _safe_execute(conn, "ALTER TABLE virtual_printers ADD COLUMN save_ams_mapping BOOLEAN DEFAULT 0")
+    else:
+        await _safe_execute(conn, "ALTER TABLE virtual_printers ADD COLUMN save_ams_mapping BOOLEAN DEFAULT FALSE")
+
     # Per-VP opt-in for auto-print G-code injection (#1516). Default false so
     # existing gcode_snippets users don't silently start injecting on VP/Studio
     # Send jobs after upgrading.
@@ -1285,6 +1693,16 @@ async def run_migrations(conn):
     # still load; nothing reads or writes to it anymore.
     await _safe_execute(conn, "ALTER TABLE print_queue ADD COLUMN nozzle_mapping TEXT")
     await _safe_execute(conn, "ALTER TABLE print_queue ADD COLUMN nozzles_info TEXT")
+
+    # Migration: nozzle_rack_choice (#1784). Which rack position each filament
+    # group prints from, as JSON {group_id: 1-based position}. Kept separate
+    # from nozzle_mapping above because that one is BambuStudio's own expanded
+    # answer and rides to the printer verbatim, while this is the operator's
+    # pick and has to survive being re-checked against a rack that may have
+    # been re-loaded since. Also on the variants table so a batch clone does
+    # not silently lose it. Nullable TEXT, no Postgres / SQLite divergence.
+    await _safe_execute(conn, "ALTER TABLE print_queue ADD COLUMN nozzle_rack_choice TEXT")
+    await _safe_execute(conn, "ALTER TABLE print_queue_variants ADD COLUMN nozzle_rack_choice TEXT")
 
     # Migration: Add target_parts_count column to projects for tracking total parts needed
     await _safe_execute(conn, "ALTER TABLE projects ADD COLUMN target_parts_count INTEGER")
@@ -1313,12 +1731,15 @@ async def run_migrations(conn):
             result = await conn.execute(text("SELECT sql FROM sqlite_master WHERE type='table' AND name='print_queue'"))
             row = result.fetchone()
             if row and "printer_id INTEGER NOT NULL" in (row[0] or ""):
+                cols_result = await conn.execute(text("PRAGMA table_info(print_queue)"))
+                col_names = {col[1] for col in cols_result.fetchall()}
                 await conn.execute(
                     text("""
                     CREATE TABLE print_queue_new (
                         id INTEGER PRIMARY KEY,
                         printer_id INTEGER REFERENCES printers(id) ON DELETE CASCADE,
                         archive_id INTEGER NOT NULL REFERENCES print_archives(id) ON DELETE CASCADE,
+                        cost_center_id INTEGER REFERENCES cost_centers(id) ON DELETE SET NULL,
                         project_id INTEGER REFERENCES projects(id) ON DELETE SET NULL,
                         position INTEGER DEFAULT 0,
                         scheduled_time DATETIME,
@@ -1334,15 +1755,26 @@ async def run_migrations(conn):
                     )
                 """)
                 )
-                await conn.execute(
-                    text("""
+                if "cost_center_id" in col_names:
+                    await conn.execute(
+                        text("""
                     INSERT INTO print_queue_new
-                    SELECT id, printer_id, archive_id, project_id, position, scheduled_time,
+                    SELECT id, printer_id, archive_id, cost_center_id, project_id, position, scheduled_time,
                            manual_start, require_previous_success, auto_off_after, ams_mapping,
                            status, started_at, completed_at, error_message, created_at
                     FROM print_queue
                 """)
-                )
+                    )
+                else:
+                    await conn.execute(
+                        text("""
+                    INSERT INTO print_queue_new
+                    SELECT id, printer_id, archive_id, NULL, project_id, position, scheduled_time,
+                           manual_start, require_previous_success, auto_off_after, ams_mapping,
+                           status, started_at, completed_at, error_message, created_at
+                    FROM print_queue
+                """)
+                    )
                 await conn.execute(text("DROP TABLE print_queue"))
                 await conn.execute(text("ALTER TABLE print_queue_new RENAME TO print_queue"))
         except (OperationalError, ProgrammingError):
@@ -1546,6 +1978,8 @@ async def run_migrations(conn):
             result = await conn.execute(text("SELECT sql FROM sqlite_master WHERE type='table' AND name='print_queue'"))
             row = result.fetchone()
             if row and "archive_id INTEGER NOT NULL" in (row[0] or ""):
+                cols_result = await conn.execute(text("PRAGMA table_info(print_queue)"))
+                col_names = {col[1] for col in cols_result.fetchall()}
                 await conn.execute(
                     text("""
                     CREATE TABLE print_queue_new2 (
@@ -1553,6 +1987,7 @@ async def run_migrations(conn):
                         printer_id INTEGER REFERENCES printers(id) ON DELETE CASCADE,
                         archive_id INTEGER REFERENCES print_archives(id) ON DELETE CASCADE,
                         library_file_id INTEGER REFERENCES library_files(id) ON DELETE CASCADE,
+                        cost_center_id INTEGER REFERENCES cost_centers(id) ON DELETE SET NULL,
                         project_id INTEGER REFERENCES projects(id) ON DELETE SET NULL,
                         position INTEGER DEFAULT 0,
                         scheduled_time DATETIME,
@@ -1575,17 +2010,30 @@ async def run_migrations(conn):
                     )
                 """)
                 )
-                await conn.execute(
-                    text("""
+                if "cost_center_id" in col_names:
+                    await conn.execute(
+                        text("""
                     INSERT INTO print_queue_new2
-                    SELECT id, printer_id, archive_id, NULL, project_id, position, scheduled_time,
+                    SELECT id, printer_id, archive_id, NULL, cost_center_id, project_id, position, scheduled_time,
                            manual_start, require_previous_success, auto_off_after, ams_mapping, plate_id,
                            COALESCE(bed_levelling, 1), COALESCE(flow_cali, 0), COALESCE(vibration_cali, 1),
                            COALESCE(layer_inspect, 0), COALESCE(timelapse, 0), COALESCE(use_ams, 1),
                            status, started_at, completed_at, error_message, created_at
                     FROM print_queue
                 """)
-                )
+                    )
+                else:
+                    await conn.execute(
+                        text("""
+                    INSERT INTO print_queue_new2
+                    SELECT id, printer_id, archive_id, NULL, NULL, project_id, position, scheduled_time,
+                           manual_start, require_previous_success, auto_off_after, ams_mapping, plate_id,
+                           COALESCE(bed_levelling, 1), COALESCE(flow_cali, 0), COALESCE(vibration_cali, 1),
+                           COALESCE(layer_inspect, 0), COALESCE(timelapse, 0), COALESCE(use_ams, 1),
+                           status, started_at, completed_at, error_message, created_at
+                    FROM print_queue
+                """)
+                    )
                 await conn.execute(text("DROP TABLE print_queue"))
                 await conn.execute(text("ALTER TABLE print_queue_new2 RENAME TO print_queue"))
         except (OperationalError, ProgrammingError):
@@ -1939,6 +2387,7 @@ async def run_migrations(conn):
             layer_usage TEXT,
             filament_properties TEXT,
             tray_remain_start TEXT,
+            tray_now_at_start INTEGER,
             UNIQUE(printer_id, archive_id)
         )
         """
@@ -1954,6 +2403,7 @@ async def run_migrations(conn):
             layer_usage TEXT,
             filament_properties TEXT,
             tray_remain_start TEXT,
+            tray_now_at_start INTEGER,
             UNIQUE(printer_id, archive_id)
         )
         """,
@@ -1962,6 +2412,18 @@ async def run_migrations(conn):
     # the original schema: add tray_remain_start, and relax filament_usage's
     # NOT NULL so the no-3MF branch can persist a remain-only tracking row.
     await _safe_execute(conn, "ALTER TABLE active_print_spoolman ADD COLUMN tray_remain_start TEXT")
+    # Which slot the print was drawing from at the start, so the remain%-delta
+    # fallback can tell a slot this print used from one it never touched
+    # (#1820). Nullable, because a row written mid-upgrade has no answer to
+    # give. INTEGER is spelled the same either way; the branch is only for
+    # IF NOT EXISTS, which SQLite's ALTER TABLE does not accept.
+    if is_sqlite():
+        await _safe_execute(conn, "ALTER TABLE active_print_spoolman ADD COLUMN tray_now_at_start INTEGER")
+    else:
+        await _safe_execute(
+            conn,
+            "ALTER TABLE active_print_spoolman ADD COLUMN IF NOT EXISTS tray_now_at_start INTEGER",
+        )
     if is_sqlite():
         # SQLite can't ALTER COLUMN; patch sqlite_master directly. Mirrors the
         # users.password_hash NULL-relaxation a few hundred lines below — see
@@ -2512,12 +2974,68 @@ async def run_migrations(conn):
     except (OperationalError, ProgrammingError):
         pass
 
+    # Migration (#342): batch orders — planning metadata on print_batches. The
+    # per-plate target rows live in their own table, created by create_all().
+    await _safe_execute(
+        conn, "ALTER TABLE print_batches ADD COLUMN project_id INTEGER REFERENCES projects(id) ON DELETE SET NULL"
+    )
+    await _safe_execute(conn, "ALTER TABLE print_batches ADD COLUMN notes TEXT")
+    if is_sqlite():
+        await _safe_execute(conn, "ALTER TABLE print_batches ADD COLUMN due_date DATETIME")
+        await _safe_execute(conn, "ALTER TABLE print_batches ADD COLUMN completed_at DATETIME")
+    else:
+        await _safe_execute(conn, "ALTER TABLE print_batches ADD COLUMN due_date TIMESTAMP")
+        await _safe_execute(conn, "ALTER TABLE print_batches ADD COLUMN completed_at TIMESTAMP")
+
+    # Migration (#342): attribute a logged run to the queue item that produced
+    # it, so batch cost/energy can be summed without guessing from archive_id.
+    await _safe_execute(
+        conn,
+        "ALTER TABLE print_log_entries ADD COLUMN queue_item_id INTEGER REFERENCES print_queue(id) ON DELETE SET NULL",
+    )
+    await _safe_execute(
+        conn, "CREATE INDEX IF NOT EXISTS ix_print_log_entries_queue_item_id ON print_log_entries (queue_item_id)"
+    )
+
     # Migration: Shortest-job-first scheduling columns on print_queue
     await _safe_execute(conn, "ALTER TABLE print_queue ADD COLUMN print_time_seconds INTEGER")
     await _safe_execute(conn, "ALTER TABLE print_queue ADD COLUMN been_jumped BOOLEAN DEFAULT FALSE NOT NULL")
 
     # Migration: Auto-print G-code injection (#422)
     await _safe_execute(conn, "ALTER TABLE print_queue ADD COLUMN gcode_injection BOOLEAN DEFAULT FALSE NOT NULL")
+
+    # Migration: Store estimated print cost for budget checks before queued jobs start
+    await _safe_execute(conn, "ALTER TABLE print_queue ADD COLUMN estimated_cost FLOAT")
+    await _safe_execute(conn, "ALTER TABLE print_queue ADD COLUMN billing_run_id VARCHAR(36)")
+    await _safe_execute(conn, "ALTER TABLE print_archives ADD COLUMN billing_run_id VARCHAR(36)")
+    if is_sqlite():
+        await _safe_execute(conn, "ALTER TABLE wallet_transactions ADD COLUMN is_voided BOOLEAN DEFAULT 0 NOT NULL")
+    else:
+        await _safe_execute(conn, "ALTER TABLE wallet_transactions ADD COLUMN is_voided BOOLEAN DEFAULT FALSE NOT NULL")
+    await _safe_execute(
+        conn,
+        "CREATE INDEX IF NOT EXISTS ix_wallet_transactions_is_voided ON wallet_transactions (is_voided)",
+    )
+    if is_sqlite():
+        await _safe_execute(
+            conn,
+            "ALTER TABLE notification_providers ADD COLUMN on_billing_charge_failed BOOLEAN DEFAULT 1",
+        )
+    else:
+        await _safe_execute(
+            conn,
+            "ALTER TABLE notification_providers ADD COLUMN on_billing_charge_failed BOOLEAN DEFAULT TRUE",
+        )
+
+    # Reprints reuse their source archive, so archive uniqueness must only be
+    # the legacy fallback for rows without a per-run UUID. The globally unique
+    # print_run_id is the idempotency key for all new charges.
+    await _safe_execute(conn, "DROP INDEX IF EXISTS uq_wallet_transactions_archive")
+    await _safe_execute(
+        conn,
+        "CREATE UNIQUE INDEX IF NOT EXISTS uq_wallet_transactions_archive"
+        " ON wallet_transactions (transaction_type, print_archive_id) WHERE print_run_id IS NULL",
+    )
 
     # Migration: Add backup_spools and backup_archives columns to github_backup_config
     await _safe_execute(conn, "ALTER TABLE github_backup_config ADD COLUMN backup_spools BOOLEAN DEFAULT 0")
@@ -3702,6 +4220,14 @@ async def run_migrations(conn):
     else:
         await _safe_execute(conn, "ALTER TABLE oidc_providers ADD COLUMN is_autologin BOOLEAN DEFAULT false")
 
+    # Migration: Add is_env_managed column to oidc_providers (#2593). Marks the
+    # provider upserted from BAMBUDDY_OIDC_* env vars on startup. Postgres
+    # rejects ``DEFAULT 0`` for BOOLEAN columns.
+    if is_sqlite():
+        await _safe_execute(conn, "ALTER TABLE oidc_providers ADD COLUMN is_env_managed BOOLEAN DEFAULT 0")
+    else:
+        await _safe_execute(conn, "ALTER TABLE oidc_providers ADD COLUMN is_env_managed BOOLEAN DEFAULT false")
+
     # Migration: Add dispatch_attempts to print_queue (#2555). Counts the times
     # the start-watchdog reverted the row from 'printing' back to 'pending' so a
     # printer that never actually starts stops being retried forever. INTEGER
@@ -3799,6 +4325,178 @@ async def run_migrations(conn):
     # Migration: Disambiguate the four ``user_print_*`` notification template
     # names by appending " Email" (#1792). See ``_migrate_rename_user_print_template_names``.
     await _migrate_rename_user_print_template_names(conn)
+
+    # Migration: per-file print progress inside a project (#1897).
+    # - print_archives.library_file_id: which library file a queued run was
+    #   dispatched from; nullable, no FK constraint added to existing tables
+    #   (SQLite can't ADD CONSTRAINT; the application uses SET NULL semantics
+    #   via the ORM on fresh installs and tolerates dangling ids by matching
+    #   hash/filename as fallback anyway).
+    # - projects.target_sets: optional copies-per-file target. INTEGER is
+    #   spelled identically on SQLite and Postgres — no dialect branch.
+    await _safe_execute(conn, "ALTER TABLE print_archives ADD COLUMN library_file_id INTEGER")
+    await _safe_execute(conn, "ALTER TABLE projects ADD COLUMN target_sets INTEGER")
+
+    # Migration: persist the timelapse snapshot-diff baseline (#2704).
+    # The list of video filenames present on the printer when the print began,
+    # so the diff survives a restart and the manual scan can use it instead of
+    # the clock-based matching that a LAN-only printer defeats. No dialect
+    # branch: SQLAlchemy renders this column as `JSON` on both SQLite and
+    # Postgres for a fresh install (checked with CreateTable against each
+    # dialect), so spelling the ALTER the same way keeps a migrated database
+    # identical to a new one. Matching matters on Postgres in particular —
+    # asyncpg binds the serialised value as json and would reject a TEXT column
+    # (mirrors the `projects.attachments JSON` migration above).
+    await _safe_execute(conn, "ALTER TABLE print_archives ADD COLUMN timelapse_baseline JSON")
+
+    # Migration: plate-clear-required notification opt-in (#2525). Off by
+    # default — it fires after every print, at the same moment as the
+    # print-complete alert. Postgres rejects `DEFAULT 0` for BOOLEAN.
+    if is_sqlite():
+        await _safe_execute(
+            conn, "ALTER TABLE notification_providers ADD COLUMN on_plate_clear_required BOOLEAN DEFAULT 0"
+        )
+    else:
+        await _safe_execute(
+            conn, "ALTER TABLE notification_providers ADD COLUMN on_plate_clear_required BOOLEAN DEFAULT false"
+        )
+
+    # Migration: variant grouping for library files (#671 / #2570). The
+    # `file_variant_groups` table itself needs no migration — create_all() above
+    # builds it — but the two member-side columns do. INTEGER and the inline
+    # REFERENCES clause are spelled identically on SQLite and Postgres, and
+    # SQLite accepts a REFERENCES on ADD COLUMN (same form as the
+    # pipeline_runs.parent_run_id migration at the top of this function).
+    await _safe_execute(
+        conn,
+        "ALTER TABLE library_files ADD COLUMN variant_group_id INTEGER "
+        "REFERENCES file_variant_groups(id) ON DELETE SET NULL",
+    )
+    await _safe_execute(conn, "ALTER TABLE library_files ADD COLUMN variant_position INTEGER DEFAULT 0")
+    # User-declared target model for a file whose 3MF does not say (#671).
+    # VARCHAR(50) is spelled identically on SQLite and Postgres.
+    await _safe_execute(conn, "ALTER TABLE library_files ADD COLUMN variant_target_model VARCHAR(50)")
+    # The model declares index=True, so fresh installs get this from create_all();
+    # migrated databases need it spelled out. Resolution looks members up by group
+    # on every scheduler pass that touches a grouped item.
+    await _safe_execute(
+        conn,
+        "CREATE INDEX IF NOT EXISTS ix_library_files_variant_group_id ON library_files (variant_group_id)",
+    )
+    await _migrate_backfill_variant_groups(conn)
+
+    # Migration: Home Assistant sensor alerts (#1148). The printer_ha_sensors
+    # table itself is new, so create_all() builds it; only the provider opt-in
+    # column needs adding to existing databases.
+    #
+    # DEFAULT FALSE, not DEFAULT 0: Postgres will not take an integer default
+    # for a boolean column, and _safe_execute swallows the DatatypeMismatchError
+    # — so the older "BOOLEAN DEFAULT 0" migrations above quietly do nothing on
+    # Postgres and only work there because create_all() builds the column on a
+    # fresh install. SQLite has understood FALSE since 3.23, so this spelling
+    # is the one that actually applies on both.
+    await _safe_execute(conn, "ALTER TABLE notification_providers ADD COLUMN on_ha_sensor_alert BOOLEAN DEFAULT FALSE")
+
+    # Migration: auto-drying-suspended notification opt-in (#2770). Defaults ON:
+    # it fires at most once per AMS unit, and only to say Bambuddy has STOPPED
+    # doing something it was doing before — silence there reads as "still
+    # drying" and is exactly how the reporter lost two days to a re-arm loop.
+    await _safe_execute(
+        conn, "ALTER TABLE notification_providers ADD COLUMN on_ams_drying_suspended BOOLEAN DEFAULT TRUE"
+    )
+
+
+async def _migrate_backfill_variant_groups(conn) -> None:
+    """Build variant groups from the slice provenance already on disk (#671 / #2570).
+
+    ``sliced_from_library_file_id`` has been stamped into ``file_metadata`` by the
+    Slice button (routes/library.py) and the pipeline runner (routes/pipeline_runs.py)
+    since those features shipped, and until now nothing ever read it back — the
+    link existed but was inert. This promotes it to real group membership so an
+    existing library arrives with its slice sets already grouped instead of
+    requiring the user to re-declare by hand what Bambuddy itself recorded.
+
+    Only sources with **two or more** sliced children carrying **distinct**
+    ``sliced_for_model`` values produce a group:
+
+    - Fewer than two candidates is not a choice, and a one-member group would
+      change nothing at print time while creating a row per sliced file in every
+      library on earth.
+    - Two children sliced for the same printer are not alternatives — the
+      resolver has no basis to prefer one, so grouping them would turn a
+      harmless duplicate into an arbitrary pick. Those sources are skipped
+      whole; the user can still group them by hand and choose an order.
+
+    The unsliced source file is deliberately not a member. It has no
+    ``sliced_for_model``, so it can never be a dispatch candidate; showing it
+    alongside its variants is a File Manager listing concern, which is out of
+    scope.
+
+    Idempotent: only files with no group yet are considered, so a re-run after a
+    partial apply resumes rather than duplicating, and a user who has since
+    ungrouped files by hand does not get them silently regrouped.
+    """
+    from sqlalchemy import text
+
+    from backend.app.models.library import FileVariantGroup
+
+    if is_sqlite():
+        source_expr = "json_extract(file_metadata, '$.sliced_from_library_file_id')"
+        model_expr = "json_extract(file_metadata, '$.sliced_for_model')"
+    else:
+        # file_metadata is JSON, not JSONB — cast before using the -> operators,
+        # matching _migrate_drop_library_print_name above.
+        source_expr = "file_metadata::jsonb->>'sliced_from_library_file_id'"
+        model_expr = "file_metadata::jsonb->>'sliced_for_model'"
+
+    async with conn.begin_nested():
+        # nosec B608 — the only interpolated fragments are the two dialect
+        # literals assigned directly above; both branches are constants and no
+        # caller value reaches this string. They are JSON *expressions*, not
+        # values, so a bind parameter cannot express them.
+        rows = (
+            await conn.execute(
+                text(
+                    f"SELECT id, {source_expr} AS source_id, {model_expr} AS model "  # nosec B608
+                    "FROM library_files "
+                    f"WHERE {source_expr} IS NOT NULL AND {model_expr} IS NOT NULL "
+                    "AND variant_group_id IS NULL AND deleted_at IS NULL "
+                    "ORDER BY id"
+                )
+            )
+        ).fetchall()
+
+        by_source: dict[str, list[tuple[int, str]]] = {}
+        for file_id, source_id, model in rows:
+            by_source.setdefault(str(source_id), []).append((file_id, str(model)))
+
+        for source_id, members in by_source.items():
+            if len(members) < 2:
+                continue
+            models = [m for _, m in members]
+            if len(set(models)) != len(models):
+                # Same printer sliced twice — ambiguous, leave it to the user.
+                continue
+
+            # Name the group after the source file when it is still around; its
+            # filename is what the user recognises. A deleted source leaves the
+            # variants perfectly usable, so fall back rather than skip.
+            name_row = (
+                await conn.execute(
+                    text("SELECT filename FROM library_files WHERE id = :sid"),
+                    {"sid": int(source_id)},
+                )
+            ).fetchone()
+            group_name = name_row[0] if name_row else f"{members[0][1]} + {len(members) - 1} more"
+
+            result = await conn.execute(FileVariantGroup.__table__.insert().values(name=group_name))
+            group_id = result.inserted_primary_key[0]
+
+            for position, (file_id, _model) in enumerate(members):
+                await conn.execute(
+                    text("UPDATE library_files SET variant_group_id = :gid, variant_position = :pos WHERE id = :fid"),
+                    {"gid": group_id, "pos": position, "fid": file_id},
+                )
 
 
 _USER_PRINT_TEMPLATE_RENAMES: tuple[tuple[str, str, str], ...] = (
@@ -3933,6 +4631,18 @@ async def seed_default_groups():
         "library:read": "library:read_own",
     }
 
+    FINANCE_PERMISSION_MIGRATION = {
+        "finance:read_own": "cost_centers:read_own",
+        "finance:read_all": "cost_centers:read_all",
+        "finance:transactions:create": "cost_centers:modify",
+        "finance:create_transactions": "cost_centers:modify",
+        "finance:createTransactions:create": "cost_centers:modify",
+        "finance:cost_centers:create": "cost_centers:create",
+        "finance:cost_centers:update": "cost_centers:modify",
+        "finance:cost_centers:assign_users": "cost_centers:modify",
+        "finance:budgets:update": "cost_centers:modify",
+    }
+
     async with async_session() as session:
         # Get existing groups
         result = await session.execute(select(Group))
@@ -3964,6 +4674,16 @@ async def seed_default_groups():
                     )
 
                     for old_perm, new_perm in migration_map.items():
+                        if old_perm in new_permissions:
+                            new_permissions.remove(old_perm)
+                            if new_perm not in new_permissions:
+                                new_permissions.append(new_perm)
+                            updated = True
+                            logger.info(
+                                "Migrated permission '%s' to '%s' in group '%s'", old_perm, new_perm, group_name
+                            )
+
+                    for old_perm, new_perm in FINANCE_PERMISSION_MIGRATION.items():
                         if old_perm in new_permissions:
                             new_permissions.remove(old_perm)
                             if new_perm not in new_permissions:
@@ -4224,3 +4944,93 @@ async def seed_color_catalog():
             )
         await session.commit()
         logger.info("Seeded %d default color catalog entries", len(DEFAULT_COLOR_CATALOG))
+
+
+async def repair_wallet_ledger_internal(session: AsyncSession):
+    """Internal helper that repairs wallet ledger using an existing session.
+
+    Used by API endpoints that need to rebuild the ledger within their own transaction.
+    """
+    from sqlalchemy import bindparam, select
+
+    from backend.app.models.finance import CostCenter, UserWallet, WalletTransaction
+    from backend.app.services.finance_balance import transaction_affects_personal_balance
+
+    center_rows = await session.execute(select(CostCenter.id, CostCenter.is_private, CostCenter.owner_user_id))
+    centers = {
+        int(center_id): (bool(is_private), owner_user_id) for center_id, is_private, owner_user_id in center_rows
+    }
+
+    # Build running balances per (user, cost_center_id) pair
+    cc_running_balances: dict[int, float] = {}  # cost_center_id -> running balance
+    user_personal_balances: dict[int, float] = {}  # user_id -> personal running balance
+
+    updated_count = 0
+    batch_size = 1000
+    batch_offset = 0
+    while True:
+        rows = (
+            await session.execute(
+                select(
+                    WalletTransaction.id,
+                    WalletTransaction.user_id,
+                    WalletTransaction.cost_center_id,
+                    WalletTransaction.amount,
+                    WalletTransaction.balance_after,
+                )
+                .where(WalletTransaction.is_voided.is_(False))
+                .order_by(WalletTransaction.created_at.asc(), WalletTransaction.id.asc())
+                .offset(batch_offset)
+                .limit(batch_size)
+            )
+        ).all()
+        if not rows:
+            break
+
+        updates: list[dict[str, object]] = []
+        for transaction_id, user_id, cost_center_id, amount, balance_after in rows:
+            amount_value = float(amount)
+            center_is_private, center_owner_user_id = centers.get(cost_center_id, (False, None))
+            affects_personal = transaction_affects_personal_balance(
+                user_id,
+                cost_center_id,
+                is_private=center_is_private,
+                owner_user_id=center_owner_user_id,
+            )
+            if cost_center_id is None:
+                new_balance = round(user_personal_balances.get(user_id, 0.0) + amount_value, 2)
+                user_personal_balances[user_id] = new_balance
+            else:
+                new_balance = round(cc_running_balances.get(cost_center_id, 0.0) + amount_value, 2)
+                cc_running_balances[cost_center_id] = new_balance
+                if affects_personal:
+                    user_personal_balances[user_id] = round(
+                        user_personal_balances.get(user_id, 0.0) + amount_value,
+                        2,
+                    )
+
+            if balance_after is None or round(float(balance_after), 2) != new_balance:
+                updates.append({"_transaction_id": transaction_id, "_balance_after": new_balance})
+
+        if updates:
+            statement = (
+                WalletTransaction.__table__.update()
+                .where(WalletTransaction.__table__.c.id == bindparam("_transaction_id"))
+                .values(balance_after=bindparam("_balance_after"))
+            )
+            await session.execute(statement, updates)
+            updated_count += len(updates)
+        batch_offset += len(rows)
+
+    # Update every wallet, including stale wallets whose canonical balance is
+    # now zero because their last personal transaction was deleted.
+    wallet_result = await session.execute(select(UserWallet))
+    for wallet in wallet_result.scalars().all():
+        balance = round(user_personal_balances.get(wallet.user_id, 0.0), 2)
+        if wallet.balance != balance:
+            wallet.balance = balance
+            session.add(wallet)
+            updated_count += 1
+
+    await session.flush()
+    return updated_count

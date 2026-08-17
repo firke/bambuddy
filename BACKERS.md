@@ -29,6 +29,7 @@ If you sponsor and your name isn't here within 48h, please write an email to mar
 - [@Rayvenhaus](https://github.com/Rayvenhaus)
 - [@TheUltimateC0der](https://github.com/TheUltimateC0der)
 - [@rstocks](https://github.com/rstocks)
+- [@Neasham21](https://github.com/Neasham21)
 
 ## Supporters ($15/mo+)
 
@@ -37,6 +38,7 @@ If you sponsor and your name isn't here within 48h, please write an email to mar
 - [@MethodicalMartian](https://github.com/MethodicalMartian)
 - [@brianharwell](https://github.com/brianharwell)
 - [@shosier01](https://github.com/shosier01)
+- [@freifunk-bamberg](https://github.com/freifunk-bamberg)
 
 ## Backers ($5/mo+)
 
@@ -68,6 +70,8 @@ If you sponsor and your name isn't here within 48h, please write an email to mar
 - [@iljur](https://github.com/iljur)
 - [@bhamiltoncx](https://github.com/bhamiltoncx)
 - [@g7ufo](https://github.com/g7ufo)
+- [@Heidelberger2000](https://github.com/Heidelberger2000)
+- [@MorganMLGman](https://github.com/MorganMLGman)
 
 ---
 

@@ -123,11 +123,17 @@ export function NotificationProviderCard({ provider, onEdit }: NotificationProvi
             {provider.on_print_complete && (
               <span className="px-2 py-0.5 bg-bambu-green/20 text-bambu-green text-xs rounded">{t('notifications.complete')}</span>
             )}
+            {provider.on_plate_clear_required && (
+              <span className="px-2 py-0.5 bg-amber-100 dark:bg-amber-500/20 text-amber-700 dark:text-amber-400 text-xs rounded">{t('notifications.plateClear')}</span>
+            )}
             {provider.on_print_failed && (
               <span className="px-2 py-0.5 bg-red-100 dark:bg-red-500/20 text-red-700 dark:text-red-400 text-xs rounded">{t('notifications.failed')}</span>
             )}
             {provider.on_print_stopped && (
               <span className="px-2 py-0.5 bg-orange-100 dark:bg-orange-500/20 text-orange-700 dark:text-orange-400 text-xs rounded">{t('notifications.stopped')}</span>
+            )}
+            {provider.on_billing_charge_failed && (
+              <span className="px-2 py-0.5 bg-red-100 dark:bg-red-600/20 text-red-700 dark:text-red-300 text-xs rounded">{t('notifications.billingChargeFailedLabel')}</span>
             )}
             {provider.on_print_progress && (
               <span className="px-2 py-0.5 bg-yellow-100 dark:bg-yellow-500/20 text-yellow-700 dark:text-yellow-400 text-xs rounded">{t('notifications.progress')}</span>
@@ -141,6 +147,9 @@ export function NotificationProviderCard({ provider, onEdit }: NotificationProvi
             {provider.on_ai_failure_detection && (
               <span className="px-2 py-0.5 bg-fuchsia-100 dark:bg-fuchsia-500/20 text-fuchsia-700 dark:text-fuchsia-300 text-xs rounded">{t('notifications.aiFailureDetection')}</span>
             )}
+            {provider.on_ha_sensor_alert && (
+              <span className="px-2 py-0.5 bg-indigo-100 dark:bg-indigo-500/20 text-indigo-700 dark:text-indigo-300 text-xs rounded">{t('notifications.haSensorAlert')}</span>
+            )}
             {provider.on_filament_low && (
               <span className="px-2 py-0.5 bg-cyan-100 dark:bg-cyan-500/20 text-cyan-700 dark:text-cyan-400 text-xs rounded">{t('notifications.lowFilament')}</span>
             )}
@@ -152,6 +161,9 @@ export function NotificationProviderCard({ provider, onEdit }: NotificationProvi
             )}
             {provider.on_ams_temperature_high && (
               <span className="px-2 py-0.5 bg-orange-100 dark:bg-orange-600/20 text-orange-700 dark:text-orange-300 text-xs rounded">{t('notifications.amsTemp')}</span>
+            )}
+            {provider.on_ams_drying_suspended && (
+              <span className="px-2 py-0.5 bg-rose-100 dark:bg-rose-600/20 text-rose-700 dark:text-rose-300 text-xs rounded">{t('notifications.amsDryingSuspended')}</span>
             )}
             {provider.on_ams_ht_humidity_high && (
               <span className="px-2 py-0.5 bg-cyan-100 dark:bg-cyan-600/20 text-cyan-700 dark:text-cyan-300 text-xs rounded">{t('notifications.amsHtHumidity')}</span>
@@ -293,6 +305,17 @@ export function NotificationProviderCard({ provider, onEdit }: NotificationProvi
 
                 <div className="flex items-center justify-between">
                   <div>
+                    <p className="text-sm text-white">{t('notifications.plateClearRequired')}</p>
+                    <p className="text-xs text-bambu-gray">{t('notifications.plateClearRequiredDescription')}</p>
+                  </div>
+                  <Toggle
+                    checked={provider.on_plate_clear_required ?? false}
+                    onChange={(checked) => updateMutation.mutate({ on_plate_clear_required: checked })}
+                  />
+                </div>
+
+                <div className="flex items-center justify-between">
+                  <div>
                     <p className="text-sm text-white">{t('notifications.bedCooledLabel')}</p>
                     <p className="text-xs text-bambu-gray">{t('notifications.bedCooledDescription')}</p>
                   </div>
@@ -353,6 +376,17 @@ export function NotificationProviderCard({ provider, onEdit }: NotificationProvi
 
                 <div className="flex items-center justify-between">
                   <div>
+                    <p className="text-sm text-white">{t('notifications.billingChargeFailedLabel')}</p>
+                    <p className="text-xs text-bambu-gray">{t('notifications.billingChargeFailedDescription')}</p>
+                  </div>
+                  <Toggle
+                    checked={provider.on_billing_charge_failed ?? true}
+                    onChange={(checked) => updateMutation.mutate({ on_billing_charge_failed: checked })}
+                  />
+                </div>
+
+                <div className="flex items-center justify-between">
+                  <div>
                     <p className="text-sm text-white">{t('notifications.progressMilestones')}</p>
                     <p className="text-xs text-bambu-gray">{t('notifications.progressMilestonesDescription')}</p>
                   </div>
@@ -391,6 +425,17 @@ export function NotificationProviderCard({ provider, onEdit }: NotificationProvi
                   <Toggle
                     checked={provider.on_ai_failure_detection ?? false}
                     onChange={(checked) => updateMutation.mutate({ on_ai_failure_detection: checked })}
+                  />
+                </div>
+
+                <div className="flex items-center justify-between">
+                  <div>
+                    <p className="text-sm text-white">{t('notifications.haSensorAlert')}</p>
+                    <p className="text-xs text-bambu-gray">{t('notifications.haSensorAlertDescription')}</p>
+                  </div>
+                  <Toggle
+                    checked={provider.on_ha_sensor_alert ?? false}
+                    onChange={(checked) => updateMutation.mutate({ on_ha_sensor_alert: checked })}
                   />
                 </div>
 
@@ -437,6 +482,17 @@ export function NotificationProviderCard({ provider, onEdit }: NotificationProvi
                   <Toggle
                     checked={provider.on_ams_temperature_high ?? false}
                     onChange={(checked) => updateMutation.mutate({ on_ams_temperature_high: checked })}
+                  />
+                </div>
+
+                <div className="flex items-center justify-between">
+                  <div>
+                    <p className="text-sm text-white">{t('notifications.amsDryingSuspendedTitle')}</p>
+                    <p className="text-xs text-bambu-gray">{t('notifications.amsDryingSuspendedDescription')}</p>
+                  </div>
+                  <Toggle
+                    checked={provider.on_ams_drying_suspended ?? false}
+                    onChange={(checked) => updateMutation.mutate({ on_ams_drying_suspended: checked })}
                   />
                 </div>
               </div>

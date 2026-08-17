@@ -1,5 +1,5 @@
 import { Cloud, CloudOff, Cog, Loader2, RefreshCw, X } from 'lucide-react';
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useId, useMemo, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import {
@@ -15,8 +15,11 @@ import {
 } from '../api/client';
 import { useSliceJobTracker } from '../contexts/SliceJobTrackerContext';
 import { useToast } from '../contexts/ToastContext';
+import { useIsWideLayout } from '../hooks/useIsWideLayout';
 import { PlatePickerModal } from './PlatePickerModal';
-import type { PlateFilament } from '../types/plates';
+import SlicerSettingsPanel, { type FilamentChoice } from './SlicerSettingsPanel';
+import type { DesignOverride, PlateFilament } from '../types/plates';
+import type { SettingValue } from '../types/slicerSettings';
 import {
   presetCompatibility,
   buildCompatibilityIndex,
@@ -227,6 +230,37 @@ export function SliceModal({ source, onClose }: SliceModalProps) {
   // see canUseEmbedded below.
   const [useEmbedded, setUseEmbedded] = useState(false);
 
+  // Auto-orient / auto-arrange (#2548) — the GUI's two layout buttons,
+  // forwarded as the slicer's --orient / --arrange CLI actions. Per-slice
+  // and off by default: both rewrite the object placement the file came
+  // with, so they are something the user asks for, never a default. Kept
+  // enabled in embedded mode, unlike the process-level options around
+  // them — these act on the geometry, whichever config drives the slice.
+  const [autoOrient, setAutoOrient] = useState(false);
+  const [autoArrange, setAutoArrange] = useState(false);
+
+  // #2622: process settings the designer changed away from the stock preset,
+  // carried onto the picked process profile so a cross-printer re-slice keeps
+  // the model's intended wall count / infill / first layer instead of losing
+  // them to --load-settings. Keys the file flags as machine-coupled (speeds,
+  // accelerations, prime-tower geometry) are listed but start unticked — those
+  // were tuned for the designer's printer and can be plain wrong on another.
+  const [designKeys, setDesignKeys] = useState<Set<string>>(new Set());
+
+  // Process settings the user edited by hand in the settings panel. Two shapes
+  // are kept: the panel's editing values, and the same set serialised into the
+  // string forms a process preset stores. The panel owns the option schema, so
+  // it hands back both rather than making this component re-derive the second.
+  const [processOverrides, setProcessOverrides] = useState<Record<string, SettingValue>>({});
+  const [serializedProcessOverrides, setSerializedProcessOverrides] = useState<Record<string, string | string[]>>({});
+  const [settingsExpanded, setSettingsExpanded] = useState(false);
+  // Wide enough for the two-column layout, where the panel has a column to
+  // itself and so is always open. The disclosure only exists for the narrow
+  // single-stack layout, in which 348 unfolded options would bury the preset
+  // pickers above them.
+  const isWideLayout = useIsWideLayout();
+  const panelOpen = isWideLayout || settingsExpanded;
+
   // Slicer Pipelines (#1425) — apply a saved preset bundle to all four slots
   // with one pick, or save the current selection as a new pipeline.
   const pipelinesQuery = useQuery({
@@ -297,10 +331,16 @@ export function SliceModal({ source, onClose }: SliceModalProps) {
   const filamentReqsQuery = useQuery({
     queryKey: ['sliceFilamentReqs', source.kind, source.id, effectivePlateId],
     queryFn: async () => {
+      // `fullSlots`: one row per project slot, not only the ones this plate
+      // prints with. The list below is positional all the way to the CLI's
+      // filament_N.json parts, so a source whose only used slot is 4 has to
+      // present four rows — otherwise the single pick binds to slot 1 and
+      // slot 4 slices with whatever the source had baked in (#2712). The
+      // unused rows stay disabled exactly as before.
       if (source.kind === 'libraryFile') {
-        return api.getLibraryFileFilamentRequirements(source.id, effectivePlateId, previewRequestId);
+        return api.getLibraryFileFilamentRequirements(source.id, effectivePlateId, previewRequestId, true);
       }
-      return api.getArchiveFilamentRequirements(source.id, effectivePlateId, previewRequestId);
+      return api.getArchiveFilamentRequirements(source.id, effectivePlateId, previewRequestId, true);
     },
     enabled: !needsPlatePicker,
     staleTime: 60_000,
@@ -381,10 +421,56 @@ export function SliceModal({ source, onClose }: SliceModalProps) {
     [printerModelsQuery.data],
   );
 
+  // The picked process preset's effective values, flattened by the sidecar.
+  // Without this the settings panel shows OrcaSlicer's compiled-in defaults —
+  // a preset with a 0.42mm line width would read 0, which is the C++ default
+  // meaning "derive from the nozzle". Keyed on the preset so switching presets
+  // re-baselines the panel.
+  const presetValuesQuery = useQuery({
+    queryKey: ['slicer-preset-values', processPreset?.source, processPreset?.id],
+    queryFn: () => api.getSlicerPresetValues(processPreset as PresetRef),
+    enabled: processPreset != null,
+    // Preset contents only change when the user edits them in the slicer, and
+    // the modal is short-lived; no need to re-fetch while it is open.
+    staleTime: 5 * 60_000,
+  });
+
+  // A failed fetch is not an error the user must act on — the panel falls back
+  // to schema defaults and says so — so treat "no data yet" as unresolved
+  // rather than blocking the panel on it.
+  const presetValues = presetValuesQuery.data?.values as Record<string, SettingValue> | undefined;
+  const presetValuesResolved = presetValuesQuery.data?.resolved ?? presetValuesQuery.isLoading;
+  // A failed request (rather than a 'resolved: false' answer) means we
+  // never reached the backend, which is the same situation as an
+  // unreachable sidecar as far as the user is concerned.
+  const presetValuesReason = presetValuesQuery.data?.reason ?? (presetValuesQuery.isError ? 'sidecar_unavailable' : undefined);
+
+  // Slot list for the settings panel's filament pickers (support base and
+  // interface, and the Multimaterial page's per-region options). Those store a
+  // plain integer, so without this the user has to map slot numbers onto their
+  // own AMS by hand. Falls back to the slot's material when a slot has no pick
+  // yet, so the list is never a column of blanks.
+  const filamentChoices = useMemo<FilamentChoice[]>(() => {
+    const data = presetsQuery.data;
+    return filamentSlots.map((slot, idx) => {
+      const ref = filamentPresets[idx] ?? null;
+      const preset = data && ref ? findPreset(data, ref, 'filament') : null;
+      return {
+        index: idx + 1,
+        label: preset?.name || slot.type || t('slice.filamentSlotUnset', 'not set'),
+        color: slot.color || undefined,
+      };
+    });
+  }, [filamentSlots, filamentPresets, presetsQuery.data, t]);
+
   // Printer / process preset names the source 3MF was prepared with. The
   // plates query resolves before the presets query (the latter is gated on
   // it), so these are known by the time the pre-pick effects run.
   const embeddedPrinter = platesQuery.data?.embedded_printer ?? null;
+  const designOverrides = useMemo<DesignOverride[]>(
+    () => platesQuery.data?.design_overrides ?? [],
+    [platesQuery.data],
+  );
   const embeddedProcess = platesQuery.data?.embedded_process ?? null;
 
   // "Slice as designed" is offered only when the source carries embedded
@@ -404,6 +490,12 @@ export function SliceModal({ source, onClose }: SliceModalProps) {
   useEffect(() => {
     if (!canUseEmbedded) setUseEmbedded(false);
   }, [canUseEmbedded]);
+
+  // Pre-tick the printer-independent design settings once the source's list
+  // arrives. Machine-coupled keys stay off until the user opts in explicitly.
+  useEffect(() => {
+    setDesignKeys(new Set(designOverrides.filter((o) => !o.printer_coupled).map((o) => o.key)));
+  }, [designOverrides]);
 
   // Printer pre-pick: defaults to the printer the 3MF was prepared for when
   // that preset is available, else the first listed printer. Runs once when
@@ -505,6 +597,20 @@ export function SliceModal({ source, onClose }: SliceModalProps) {
       // them) but go unused when this flag is set — the slicer falls back on
       // the file's embedded project_settings.config instead.
       ...(useEmbedded && canUseEmbedded ? { use_embedded_settings: true } : {}),
+      // Carried design settings are patched onto the resolved process JSON,
+      // which the embedded-settings path never sends — so they are mutually
+      // exclusive by construction (#2622).
+      ...(!useEmbedded && designKeys.size > 0 ? { design_overrides: [...designKeys] } : {}),
+      // The user's own edits from the settings panel. Like design_overrides
+      // these patch the resolved process JSON, so the embedded-settings path
+      // (which sends no process JSON at all) cannot carry them.
+      ...(!useEmbedded && Object.keys(processOverrides).length > 0
+        ? { process_overrides: serializedProcessOverrides }
+        : {}),
+      // Sent only when on. The backend defaults both to false, so omitting
+      // them keeps the request identical to what older clients send.
+      ...(autoOrient ? { auto_orient: true } : {}),
+      ...(autoArrange ? { auto_arrange: true } : {}),
     };
   }
 
@@ -546,7 +652,7 @@ export function SliceModal({ source, onClose }: SliceModalProps) {
       }}
     >
       <div
-        className="w-full max-w-xl max-h-[85vh] flex flex-col rounded-lg bg-bambu-dark-secondary border border-bambu-dark-tertiary/60"
+        className="w-full max-w-xl lg:max-w-5xl max-h-[85vh] flex flex-col rounded-lg bg-bambu-dark-secondary border border-bambu-dark-tertiary/60"
         onClick={(e) => e.stopPropagation()}
       >
         {/* Header */}
@@ -617,6 +723,13 @@ export function SliceModal({ source, onClose }: SliceModalProps) {
                   status === 'ok' (returns null in that case), but the Refresh
                   button stays visible regardless so users can pick up cloud /
                   bundled changes even when sign-in is healthy. */}
+              {/* Two columns once there is room for them. The left keeps the
+                  "what am I slicing with" decisions together; the right gives
+                  the process-settings panel a column of its own, which is the
+                  only way 348 options are comfortable to work through. Below
+                  lg both collapse back into the original single stack. */}
+              <div className="lg:grid lg:grid-cols-[minmax(0,20rem)_minmax(0,1fr)] lg:gap-5 lg:items-start">
+                <div className="space-y-4 min-w-0">
               {/* Slicer Pipelines (#1425): apply a saved preset bundle to all
                   four slots, or save the current selection as a pipeline.
                   Pipelines are managed in Settings → Workflow → Pipelines. */}
@@ -775,6 +888,7 @@ export function SliceModal({ source, onClose }: SliceModalProps) {
                 selectedPrinterName={selectedPrinterName}
                 compatIndex={compatIndex}
               />
+
               {/* Bed-type override (#1337). Always visible, always enabled.
                   The backend patches curr_bed_type on the resolved process
                   JSON before forwarding to the sidecar. */}
@@ -787,6 +901,42 @@ export function SliceModal({ source, onClose }: SliceModalProps) {
                 onChange={setBedType}
                 disabled={isEnqueuing || useEmbedded}
               />
+              {/* Layout passes (#2548) — the GUI's "Auto orient" / "Auto
+                  arrange". Not disabled in embedded mode: these are CLI
+                  actions on the geometry, so they work regardless of where
+                  the print config comes from. */}
+              <div className="flex flex-col gap-2">
+                <label className="flex items-start gap-2 text-sm text-bambu-gray cursor-pointer select-none">
+                  <input
+                    type="checkbox"
+                    checked={autoOrient}
+                    onChange={(e) => setAutoOrient(e.target.checked)}
+                    disabled={isEnqueuing}
+                    className="mt-0.5 cursor-pointer"
+                  />
+                  <span>
+                    {t('slice.autoOrient')}
+                    <span className="block text-xs text-bambu-gray/70">
+                      {t('slice.autoOrientHint')}
+                    </span>
+                  </span>
+                </label>
+                <label className="flex items-start gap-2 text-sm text-bambu-gray cursor-pointer select-none">
+                  <input
+                    type="checkbox"
+                    checked={autoArrange}
+                    onChange={(e) => setAutoArrange(e.target.checked)}
+                    disabled={isEnqueuing}
+                    className="mt-0.5 cursor-pointer"
+                  />
+                  <span>
+                    {t('slice.autoArrange')}
+                    <span className="block text-xs text-bambu-gray/70">
+                      {t('slice.autoArrangeHint')}
+                    </span>
+                  </span>
+                </label>
+              </div>
               {/* Filament reqs may need a server-side preview-slice for
                   unsliced project files (single-pass, then cached). Show a
                   scoped spinner so the user sees the printer/process
@@ -840,6 +990,88 @@ export function SliceModal({ source, onClose }: SliceModalProps) {
                   );
                 })
               )}
+                </div>
+
+                {/* Right column: the settings panel. It owns this column, so
+                    there is nothing to collapse it out of the way of — the
+                    disclosure below lg exists only because the single-column
+                    stack cannot afford 348 options unfolded.
+
+                    Kept on screen in embedded mode but disabled rather than
+                    removed: nothing here is sent on that path (the file's own
+                    settings drive the slice), and dropping the column outright
+                    made the dialog look like it had lost a feature whenever
+                    the toggle was flipped. */}
+                <div className="mt-4 lg:mt-0 min-w-0">
+                  <div
+                    className={`rounded border border-bambu-dark-tertiary p-3 ${useEmbedded ? 'opacity-60' : ''}`}
+                  >
+                    <button
+                      type="button"
+                      onClick={() => setSettingsExpanded((v) => !v)}
+                      aria-expanded={panelOpen}
+                      disabled={isWideLayout}
+                      className="flex w-full items-center justify-between gap-2 text-left lg:cursor-default"
+                    >
+                      <span className="text-sm text-white">
+                        {t('slice.processSettings', 'Process settings')}
+                        <span className="block text-xs text-bambu-gray/70">
+                          {useEmbedded
+                            ? t(
+                                'slice.processSettingsEmbedded',
+                                "Not used while \"Use the file's built-in settings\" is on -- the file's own settings drive this slice.",
+                              )
+                            : t(
+                                'slice.processSettingsHint',
+                                "Adjust the picked preset for this slice. Anything you don't touch stays as the preset defines it.",
+                              )}
+                        </span>
+                      </span>
+                      <span className="shrink-0 text-xs text-bambu-gray">
+                        {useEmbedded
+                          ? t('slice.processSettingsInactive', 'Inactive')
+                          : Object.keys(serializedProcessOverrides).length > 0
+                            ? t('slice.processSettingsChanged', '{{count}} changed', {
+                                count: Object.keys(serializedProcessOverrides).length,
+                              })
+                            : t('slice.processSettingsUnchanged', 'Preset defaults')}
+                      </span>
+                    </button>
+                    {panelOpen && (
+                      <div className="mt-3 border-t border-bambu-dark-tertiary pt-3">
+                        <SlicerSettingsPanel
+                          values={processOverrides}
+                          onChange={(values, serialized) => {
+                            setProcessOverrides(values);
+                            setSerializedProcessOverrides(serialized);
+                          }}
+                          disabled={isEnqueuing || useEmbedded}
+                          // The designer's own deviations (#2622) are shown
+                          // against the options they belong to rather than in
+                          // a list of their own. Only the tick state lives
+                          // here; the values still travel as design_overrides,
+                          // so the backend keeps reading them from the file
+                          // and keys outside the vendored schema stay faithful.
+                          filamentChoices={filamentChoices}
+                          presetValues={presetValues}
+                          presetValuesResolved={presetValuesResolved}
+                          presetValuesReason={presetValuesReason}
+                          sourceOverrides={designOverrides}
+                          sourceSelected={designKeys}
+                          onToggleSource={(key, on) =>
+                            setDesignKeys((prev) => {
+                              const next = new Set(prev);
+                              if (on) next.add(key);
+                              else next.delete(key);
+                              return next;
+                            })
+                          }
+                        />
+                      </div>
+                    )}
+                  </div>
+                </div>
+              </div>
             </>
           )}
 
@@ -1029,8 +1261,8 @@ interface PresetDropdownProps {
   // configuring against the source 3MF's per-slot colour.
   swatchColor?: string;
   // Selected printer context (#1325). When provided for a process / filament
-  // slot, presets that resolve to a different printer (per compatIndex) move
-  // into a trailing "Other printers" group instead of the main tier list.
+  // slot, presets that resolve to a different printer (per compatIndex) are
+  // held back behind a "Show all" link instead of padding out the main list.
   selectedPrinterName?: string | null;
   compatIndex?: PrinterCompatibilityIndex;
 }
@@ -1047,6 +1279,14 @@ function PresetDropdown({
   compatIndex,
 }: PresetDropdownProps) {
   const { t } = useTranslation();
+  // Reveals the other-printer group for this slot only. Per-dropdown rather
+  // than modal-wide: wanting a filament from another printer's library says
+  // nothing about wanting its process profiles too.
+  const [showAll, setShowAll] = useState(false);
+  // Binds the label to the select now that they are siblings rather than
+  // nested. Filament slots render several of these, so the id must be unique
+  // per instance rather than derived from the slot name.
+  const selectId = useId();
 
   // Tier sections (imported → cloud → standard), plus — for a process /
   // filament slot with a selected printer — a trailing group of presets that
@@ -1092,12 +1332,30 @@ function PresetDropdown({
     return { sections: compatSections, otherEntries: other };
   }, [data, slot, t, selectedPrinterName, compatIndex]);
 
+  // Other-printer presets are held back by default so the list shows what is
+  // usable on the selected printer. Two things are never hidden: a preset whose
+  // compatibility is merely *unknown* (it never reaches otherEntries), and the
+  // one currently selected — a pipeline or an auto-pick can land on a
+  // cross-printer preset, and dropping it from the options would blank the
+  // select and silently discard the choice.
+  const selectedRefValue = toRefValue(value);
+  const visibleOther = useMemo(() => {
+    if (showAll) return otherEntries;
+    return otherEntries.filter((p) => `${p.source}:${p.id}` === selectedRefValue);
+  }, [showAll, otherEntries, selectedRefValue]);
+
+  const hiddenCount = otherEntries.length - visibleOther.length;
   const totalEntries =
-    sections.reduce((sum, s) => sum + s.entries.length, 0) + otherEntries.length;
+    sections.reduce((sum, s) => sum + s.entries.length, 0) + visibleOther.length;
 
   return (
-    <label className="block">
-      <span className="flex items-center gap-2 text-xs text-bambu-gray mb-1">
+    // A plain wrapper rather than a <label> around everything: the "Show all"
+    // control is a button, and a button inside a label that also wraps the
+    // select inherits the whole label as its accessible name (screen readers
+    // announced it as "Process profile 2 hidden 0.20mm Standard @BBL X1C") as
+    // well as being invalid HTML. The label is bound to the select by id.
+    <div className="block">
+      <div className="flex items-center gap-2 text-xs text-bambu-gray mb-1">
         {swatchColor && (
           <span
             className="inline-block w-3 h-3 rounded-full border border-bambu-dark-tertiary"
@@ -1105,9 +1363,29 @@ function PresetDropdown({
             aria-hidden
           />
         )}
-        <span>{label}</span>
-      </span>
+        <label htmlFor={selectId}>{label}</label>
+        {(hiddenCount > 0 || showAll) && (
+          <span className="ml-auto flex items-center gap-1.5 font-normal">
+            {hiddenCount > 0 && (
+              <span className="text-bambu-gray/60">
+                {t('slice.presetsHidden', '{{count}} hidden', { count: hiddenCount })}
+              </span>
+            )}
+            <button
+              type="button"
+              onClick={() => setShowAll((v) => !v)}
+              disabled={disabled}
+              className="text-bambu-green hover:underline disabled:opacity-50 disabled:no-underline"
+            >
+              {showAll
+                ? t('slice.showFewerPresets', 'Show fewer')
+                : t('slice.showAllPresets', 'Show all')}
+            </button>
+          </span>
+        )}
+      </div>
       <select
+        id={selectId}
         value={toRefValue(value)}
         onChange={(e) => onChange(fromRefValue(e.target.value))}
         disabled={disabled || totalEntries === 0}
@@ -1127,9 +1405,9 @@ function PresetDropdown({
             ))}
           </optgroup>
         ))}
-        {otherEntries.length > 0 && (
+        {visibleOther.length > 0 && (
           <optgroup label={t('slice.otherPrinters')}>
-            {otherEntries.map((p) => (
+            {visibleOther.map((p) => (
               <option key={`${p.source}:${p.id}`} value={`${p.source}:${p.id}`}>
                 {p.name}
               </option>
@@ -1137,6 +1415,6 @@ function PresetDropdown({
           </optgroup>
         )}
       </select>
-    </label>
+    </div>
   );
 }

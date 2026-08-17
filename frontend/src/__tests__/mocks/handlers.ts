@@ -476,6 +476,9 @@ export const handlers = [
   http.get('/api/v1/notification-templates', () => HttpResponse.json([])),
   http.get('/api/v1/pending-uploads/', () => HttpResponse.json([])),
   http.get('/api/v1/printers/:id/ams-labels', () => HttpResponse.json([])),
+  http.get('/api/v1/printers/:id/inventory-remain', () =>
+    HttpResponse.json({ inventory_remain_g: {}, slot_materials: [] }),
+  ),
   http.get('/api/v1/printers/:id/slot-presets', () => HttpResponse.json([])),
   http.get('/api/v1/smart-plugs/by-printer/:id', () => HttpResponse.json([])),
   http.get('/api/v1/smart-plugs/by-printer/:id/scripts', () => HttpResponse.json([])),
@@ -484,6 +487,7 @@ export const handlers = [
   http.get('/api/v1/spoolman/spools/linked', () => HttpResponse.json([])),
   http.get('/api/v1/spoolman/spools/unlinked', () => HttpResponse.json([])),
   http.get('/api/v1/users/', () => HttpResponse.json([])),
+  http.get('/api/v1/users/slim', () => HttpResponse.json([])),
 
   // Status / object endpoints → minimal disabled-state responses
   http.get('/api/v1/archives/purge/settings', () =>
@@ -535,6 +539,11 @@ export const handlers = [
       external_url_configured: false,
     })
   ),
+  http.get('/api/v1/obico/printer-status', () =>
+    HttpResponse.json({ enabled: false, monitored_printers: null, per_printer: {}, last_error: null })
+  ),
+  // Per-file project print progress (#1897) — empty means "no completed runs"
+  http.get('/api/v1/projects/:id/file-progress', () => HttpResponse.json([])),
   http.get('/api/v1/printers/:id/current-print-user', () => HttpResponse.json(null)),
   http.get('/api/v1/settings/check-ffmpeg', () =>
     HttpResponse.json({ available: false, version: null })
